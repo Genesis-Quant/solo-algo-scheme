@@ -1,0 +1,13 @@
+[project]
+name = "scheme"
+version = "0.1.0"
+description = "Shared context and result types for Solo research algorithms."
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2,<3",
+    "backtest @ git+https://github.com/Genesis-Quant/backtest@d6ea13caec7f049ac32b715486636f38fccfab79",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.26,<0.10.0"]
+build-backend = "uv_build"
