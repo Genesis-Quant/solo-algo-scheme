@@ -1,4 +1,4 @@
 from .context import ResearchContext
-from .models import Order, Recommendation, TargetPortfolio
+from .models import Asset, Order, Signal, TargetPortfolio
 
-__all__ = ["Order", "Recommendation", "ResearchContext", "TargetPortfolio"]
+__all__ = ["Asset", "Order", "ResearchContext", "Signal", "TargetPortfolio"]
