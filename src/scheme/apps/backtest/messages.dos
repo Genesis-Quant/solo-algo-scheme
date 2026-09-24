@@ -1,0 +1,46 @@
+// Daily open/close synthetic snapshots. Price limits must be supplied by source data.
+def soloDailyMessages(daily) {
+    openRows = select code, temporalAdd(temporalAdd(timestamp(time), 9, "h"), 30, "m") as timestamp,
+        open as lastPrice, pre_close as prevClosePrice,
+        up_limit as upLimitPrice, down_limit as downLimitPrice from daily
+    closeRows = select code, temporalAdd(timestamp(time), 15, "h") as timestamp,
+        close as lastPrice, pre_close as prevClosePrice,
+        up_limit as upLimitPrice, down_limit as downLimitPrice from daily
+    rows = unionAll(openRows, closeRows).sortBy!(`timestamp`code)
+    quantities = take(1000000000l, rows.rows())
+    ends = int(1..rows.rows())
+    return table(string(rows.code) as symbol,
+        iif(endsWith(string(rows.code), ".XSHE"), "XSHE", "XSHG") as symbolSource,
+        rows.timestamp, double(rows.lastPrice) as lastPrice,
+        double(rows.prevClosePrice) as prevClosePrice,
+        double(rows.upLimitPrice) as upLimitPrice,
+        double(rows.downLimitPrice) as downLimitPrice,
+        quantities as totalBidQty, quantities as totalOfferQty,
+        arrayVector(ends, double(rows.lastPrice)) as bidPrice,
+        arrayVector(ends, double(rows.lastPrice)) as offerPrice,
+        arrayVector(ends, quantities) as bidQty,
+        arrayVector(ends, quantities) as offerQty)
+}
+
+def soloTickMessages(raw, reference, universe) {
+    if (raw.rows() == 0) return table(array(TIMESTAMP,0) as timestamp)
+    quotes = table(string(raw.SecurityID) + iif(string(raw.Market)=="SZ", ".XSHE", ".XSHG") as symbol,
+        iif(string(raw.Market)=="SZ", "XSHE", "XSHG") as symbolSource,
+        raw.TradeDate as tradeDate, concatDateTime(raw.TradeDate, raw.TradeTime) as timestamp,
+        double(raw.LastPrice) as lastPrice,
+        fixedLengthArrayVector(double(raw.BidPrice1),double(raw.BidPrice2),double(raw.BidPrice3),double(raw.BidPrice4),double(raw.BidPrice5)) as bidPrice,
+        fixedLengthArrayVector(double(raw.AskPrice1),double(raw.AskPrice2),double(raw.AskPrice3),double(raw.AskPrice4),double(raw.AskPrice5)) as offerPrice,
+        fixedLengthArrayVector(long(raw.BidVolume1),long(raw.BidVolume2),long(raw.BidVolume3),long(raw.BidVolume4),long(raw.BidVolume5)) as bidQty,
+        fixedLengthArrayVector(long(raw.AskVolume1),long(raw.AskVolume2),long(raw.AskVolume3),long(raw.AskVolume4),long(raw.AskVolume5)) as offerQty,
+        long(raw.BidVolume1+raw.BidVolume2+raw.BidVolume3+raw.BidVolume4+raw.BidVolume5) as totalBidQty,
+        long(raw.AskVolume1+raw.AskVolume2+raw.AskVolume3+raw.AskVolume4+raw.AskVolume5) as totalOfferQty)
+    quotes = select * from quotes where symbol in universe
+    refs = select date(time) as tradeDate, string(code) as symbol, double(pre_close) as prevClosePrice,
+        double(up_limit) as upLimitPrice, double(down_limit) as downLimitPrice from reference
+    quotes = lj(quotes, refs, `tradeDate`symbol)
+    if (any(isNull(quotes.prevClosePrice) || isNull(quotes.upLimitPrice) || isNull(quotes.downLimitPrice)))
+        throw "Snapshot reference prices are missing"
+    return select symbol, symbolSource, timestamp, lastPrice, prevClosePrice,
+        upLimitPrice, downLimitPrice, totalBidQty, totalOfferQty,
+        bidPrice, offerPrice, bidQty, offerQty from quotes order by timestamp, symbol
+}

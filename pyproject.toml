@@ -1,12 +1,36 @@
 [project]
 name = "scheme"
-version = "0.1.0"
-description = "Shared context and result types for Solo research algorithms."
-requires-python = ">=3.12"
+version = "1.0.0"
+description = "Solo research interfaces, strategy assembly and execution."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "pydantic>=2,<3",
+    "pandas>=2.2,<3",
+    "numpy>=2,<3",
+    "scipy>=1.14",
+    "pyarrow>=21",
+    "packaging>=24",
+    "tushare>=1.4.29,<2",
     "backtest @ git+https://github.com/Genesis-Quant/backtest@d6ea13caec7f049ac32b715486636f38fccfab79",
+    "arena-runtime @ git+https://github.com/Genesis-Quant/runtime@eeebfe417aa999fa1e386cbd62b74326a5dab66c",
 ]
+
+[project.scripts]
+scheme = "scheme.manage:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.16"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
 
 [build-system]
 requires = ["uv_build>=0.9.26,<0.10.0"]
