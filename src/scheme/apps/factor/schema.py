@@ -3,6 +3,7 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from scheme import FactorParams
+from scheme.symbols import engine_symbol
 from scheme.utils.schema import Component, Task
 
 
@@ -16,6 +17,7 @@ class FactorAnalysisParameters(FactorParams):
 
     @model_validator(mode="after")
     def check_columns(self) -> "FactorAnalysisParameters":
+        self.calendar_symbol = engine_symbol(self.calendar_symbol)
         if len(set(self.columns)) != len(self.columns):
             raise ValueError("因子列不能重复")
         if any(period < 1 for period in self.return_periods):

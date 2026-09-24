@@ -133,7 +133,7 @@ params = FactorParams(
 panel = params.universe.evaluate(params.start, params.end)
 ```
 
-面板索引名为 `date`，覆盖查询区间的全部交易日；列为期间至少一次入池的股票代码（`.SH/.SZ`），
+面板索引名为 `date`，覆盖查询区间的全部交易日；列为期间至少一次入池的股票代码（`.XSHG/.XSHE`），
 值为 `bool`。退池后为 `False`，某天没有成员时保留全 `False` 行；整个区间没有成员时保留日期、返回零列。
 `lookback` 用于 DSL 回看和历史权重前向填充，不进入输出日期范围；应覆盖起始日前最近一次成分权重记录。
 Factor 和 Strategy 的 `universe` 属性首次访问时查询并缓存这张面板。
@@ -142,6 +142,9 @@ Algo 可通过 `self.backtest.universe` 读取；回测未指定 `symbols` 时�
 CLI 因子任务将 `analysis` 的这三个公共参数传入 Factor；具体因子参数仍取 `factor.params`。
 
 默认 Optimize 只接受有符号数值 Signal；自定义结构必须配套 Optimize。
+Solo 研究链路统一使用 `.XSHG/.XSHE`：股票池、Signal、Target、行情、持仓与回报使用相同代码。
+输入兼容 `.SH/.SZ`，在股票池查询、Context 消息、行情参数及下单/撤单入口转换；
+直接调用 Arena `query` 时仍保留其原始 `.SH/.SZ` 格式。Signal/Target 同时包含同一证券的两种后缀会报错，不覆盖其中一个值。
 Algo 可以直接下单，也可以在任意回调中写 signal。Model → Optimize → Control → Execution 依次消费 signal、target、orders；None 表示无消息，空集合仍会被消费。基类在调用特有函数前取走并清空输入，再将消息传入 on_signal(signals)、on_target(target)、on_orders(orders)。特有函数返回 None，只负责写下游消息或下单；函数内新写入的上游消息留待下一轮消费。Execution 下单产生的回报在当前处理结束后进入下一轮逆序通知，不需要等待下一条行情。
 target 为 dict[Asset, float]，表示完整目标资产权重，以账户权益为分母；正数做多，负数做空，未列出的原持仓目标为零。None 表示没有新目标，空字典表示清仓。默认 Optimize 只生成风险平价权重；NoControl 根据权重、权益、当前价格和 lot_size 转换为市价订单，全部通过；Execution 直接提交订单。
 若轮到提交时已经收盘或午休，订单保留到下一个可交易回调；真正报单时将 time 设置为当前回测时间。
@@ -153,4 +156,4 @@ target 为 dict[Asset, float]，表示完整目标资产权重，以账户权益
 
 验证：`uv run pytest` 默认执行无需服务的测试；设置 `SOLO_TEST_DOLPHIN=1` 并提供以上连接变量后，
 会额外执行真实 DolphinDB 的因子统计、日线合成快照与 tick 字段转换/成交记账测试。
-这些确定性测试只在各自会话中构造行情，不写入基础数据表。`tests/fixtures/research` 是安装与 CLI 验证用的研究包。
+这些确定性测试只在各自会话中构造行情，不写入基础数据表。

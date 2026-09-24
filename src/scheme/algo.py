@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from .context import ResearchContext
 from .models import Order, Signal, Target
+from .symbols import normalize_assets, normalize_order
 
 if TYPE_CHECKING:
     from .backtest import Backtest
@@ -36,6 +37,7 @@ class OptimizeAlgo[P: BaseModel, C: ResearchContext[Any]](Algo[P, C]):
         signals = self.ctx.signal
         if signals is None or self.ctx.target is not None:
             return False
+        signals = normalize_assets(signals)
         self.ctx.signal = None
         self.on_signal(signals)
         return True
@@ -51,6 +53,7 @@ class ControlAlgo[P: BaseModel, C: ResearchContext[Any]](Algo[P, C]):
         target = self.ctx.target
         if target is None or self.ctx.orders is not None:
             return False
+        target = normalize_assets(target)
         self.ctx.target = None
         self.on_target(target)
         return True
@@ -66,6 +69,7 @@ class ExecutionAlgo[P: BaseModel, C: ResearchContext[Any]](Algo[P, C]):
         orders = self.ctx.orders
         if orders is None:
             return False
+        orders = [normalize_order(order) for order in orders]
         self.ctx.orders = None
         self.on_orders(orders)
         return True

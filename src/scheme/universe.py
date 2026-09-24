@@ -6,6 +6,8 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny
 from runtime.apps.query import Derivative, FactorQuery, execute_query
 
+from .symbols import engine_symbol, source_symbol
+
 __all__ = ["Universe"]
 
 
@@ -25,6 +27,7 @@ class Universe(BaseModel):
         return FactorQuery.model_validate(
             {
                 **self.model_dump(mode="json"),
+                "codes": list(dict.fromkeys(source_symbol(code) for code in self.codes)),
                 "start_date": start.isoformat(),
                 "end_date": (end - timedelta(days=1)).isoformat(),
             }
@@ -45,6 +48,8 @@ class Universe(BaseModel):
         if members.empty:
             return pd.DataFrame(index=index, columns=pd.Index([], name="code"), dtype=bool)
         members["date"] = pd.to_datetime(members.date)
+        members["code"] = members.code.map(engine_symbol)
+        members = members.drop_duplicates(["date", "code"])
         members["member"] = True
         panel = members.pivot(index="date", columns="code", values="member")
         return panel.reindex(index=index, columns=sorted(panel.columns)).notna()

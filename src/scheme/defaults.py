@@ -14,7 +14,7 @@ from scipy.optimize import minimize
 from .algo import ControlAlgo, ExecutionAlgo, OptimizeAlgo
 from .context import ResearchContext
 from .models import Order, Signal, Target
-from .symbols import engine_symbol, source_symbol
+from .symbols import engine_symbol, normalize_assets, source_symbol
 
 __all__ = [
     "RiskParity",
@@ -79,6 +79,7 @@ class RiskParity[C: ResearchContext[Any]](OptimizeAlgo[OptimizeParams, C]):
     def allocate(self, signals: Signal[Any]) -> Target:
         from runtime.apps.query import execute_query as query
 
+        signals = normalize_assets(signals)
         if any(not isinstance(s, (int, float)) or not np.isfinite(s) for s in signals.values()):
             raise TypeError("默认风险平价接受有符号数值 Signal；其他值类型请提供自定义 Optimize")
         symbols = [s for s, value in signals.items() if value != 0]
@@ -129,6 +130,7 @@ class NoControl[C: ResearchContext[Any]](ControlAlgo[ControlParams, C]):
 
     def target_orders(self, target: Target) -> list[Order]:
         """以账户权益为分母，将完整目标权重转换为相对当前持仓的订单。"""
+        target = normalize_assets(target)
         if any(not np.isfinite(weight) for weight in target.values()):
             raise ValueError("目标权重必须是有限数值")
         quantities: dict[str, int] = {}
