@@ -9,7 +9,7 @@ from runtime.apps.backtest import run_backtest
 from runtime.apps.backtest.schema import CALLBACK_PARAMETER_COUNTS
 from runtime.apps.query import execute_query
 
-from scheme.data.dolphindb import backtest, query
+from scheme.data import backtest, query
 
 
 def test_exports_are_arena_functions():

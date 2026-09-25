@@ -3,6 +3,50 @@
 scheme 提供 Factor/Algo/Strategy 接口、参数模型、策略组装、数据源、因子分析、回测驱动及报告生成。
 所有研究执行代码与接口版本一起发布；不依赖 solo-runtime。
 
+包结构按职责划分：
+
+```text
+scheme/
+├── base/
+│   ├── internal/   # 共用 Algo、Context、Params、ReportForm 和类型
+│   ├── projects/
+│   │   ├── factor/     # algo.py、params.py、form.py
+│   │   ├── model/      # algo.py、params.py、form.py
+│   │   ├── optimize/   # algo.py、params.py、form.py、default.py
+│   │   ├── control/    # algo.py、params.py、form.py、default.py
+│   │   └── execution/  # algo.py、params.py、form.py、default.py
+│   └── __init__.py # 显式导入公共接口，通过 __all__ 控制导出
+├── data/
+│   ├── dolphindb/  # 查询、股票池、代码转换；database/ 管理连接与会话
+│   ├── tushare/    # Tushare SDK 和 Pro 客户端
+│   └── __init__.py # 统一导出 query、backtest、ts_api、pro
+├── report/      # 共用 Notebook/HTML 展示和前端资源
+├── execute/
+│   ├── factor/    # 因子分析、结果和正式任务入口
+│   ├── strategy/  # 策略组装、回测驱动、结果和正式任务入口
+│   └── ...        # 共用任务协议、包校验、结果保存
+├── manage/         # CLI 入口、项目表单模型发现
+└── config.py       # 服务连接配置
+```
+
+`base` 只定义研究源码和 Notebook 使用的算法、参数、表单、Context 和类型。
+回测驱动在 `execute/strategy/engine.py`；泛型解析和 Context 适配校验在 `execute/strategy/assembly.py`；
+报告实现位于 `report/`，不从 `base` 导出这些执行工具。
+`execute/factor` 和 `execute/strategy` 实现各自研究流程；组合、风控、执行的默认算法分别位于
+`base/projects/optimize/default.py`、`base/projects/control/default.py`、`base/projects/execution/default.py`。
+`execute` 校验运行环境后调用研究接口，`manage` 提供命令入口。
+项目可从 `scheme.base` 或 `scheme` 导入 Factor/Algo 等公共基类；
+从 `scheme.base` 导入 `FactorReportForm` 和 `FactorAnalysisParams`。
+
+每类项目统一从 `scheme.base` 导入对应的 Algo、Params 和 ReportForm；
+公共入口由 `base/__init__.py` 的显式导入和 `__all__` 定义，不要求调用方了解内部目录。
+因子目录导出 Factor、FactorParams、FactorAnalysisParams 和 FactorReportForm。
+四类策略项目的 Params 由项目继承并定义具体算法字段，统一从 StrategyParams 中取值。
+ModelReportForm、OptimizeReportForm、ControlReportForm、ExecutionReportForm 当前仅继承
+ReportForm 抽象接口，不预设研究字段，也未实现 build()；各项目后续独立定义。
+FactorReportForm 已实现字段及 build()，返回 FactorAnalysisParams。
+`scheme parameters` 读取项目导出的对应 ReportForm，生成 JSON Schema 并校验输入。
+
 同一 Scheme 大版本内，Factor/Algo 基类、Context、事件与消息消费语义、CLI 输入以及报告文件结构保持兼容；破坏性修改必须升级大版本。Algo 包主版本与 Scheme 一致，小版本可独立迭代，必须声明整个大版本依赖范围（例如 `scheme>=1.0.0,<2.0.0`），不得把开发时的精确版本或 Git commit 写进 wheel 的依赖。项目和正式任务使用 uv source 与锁文件固定实际版本。其他共享依赖也须维持可共同解析的范围。
 
 组装时统一使用一个 Scheme 安装实例，按各 Algo 的参数模型校验统一参数，并校验 Context 类型。Context 赋值校验 Signal/Target/Order 类型；Model 的 Signal 业务结构仍须与 Optimize 一致，不能仅凭包版本推断信号含义。每次发布应验证跨小版本 Algo 的混合安装、组装及原有报告契约。
@@ -21,7 +65,7 @@ kind=factor/backtest 分别执行因子分析和策略回测，输出 Parquet，
 完成清单包含原始输入、锁文件和各报告文件的 SHA256，以及实际安装版本。
 完整输入示例位于根工作区 runtime/examples，进程协议见 runtime/README.md。
 
-Jupyter SDK 使用 `scheme.apps.factor`、`scheme.apps.backtest`、`scheme.data`、`scheme.database`。
+Jupyter SDK 使用 `scheme.base`、`scheme.execute`、`scheme.data`。
 连接变量沿用 Arena：`DOLPHIN_HOST`、`DOLPHIN_PORT`、`DOLPHIN_RUNTIME_USERNAME`、
 `DOLPHIN_RUNTIME_PASSWORD`；长表默认 `dfs://CoreData/coreData`，字段为 time/code/factor/value。
 通过 `DOLPHIN_CORE_DATABASE`、`DOLPHIN_CORE_TABLE` 覆盖。只读取基础数据，不采集或更新。
@@ -29,16 +73,16 @@ Jupyter SDK 使用 `scheme.apps.factor`、`scheme.apps.backtest`、`scheme.data`
 
 Python 入口：
 
-数据源位于 `scheme.data`，分别按需导入：
+数据查询统一从 `scheme.data` 按需导入：
 
 ```python
 from scheme.config import DolphinSettings
-from scheme.database import create_session
-from scheme.data.dolphindb import query, backtest
-from scheme.data.tushare import ts_api, pro
+from scheme.data.dolphindb.database import create_session
+from scheme.data import query, backtest
+from scheme.data import ts_api, pro
 ```
 
-DolphinDB 数据源仅导出 Arena 的 `query`、`backtest`。Tushare 仅导出原始 SDK `ts_api` 和 Pro 客户端 `pro`，
+`scheme.data` 导出 DolphinDB 的 Arena `query`、`backtest`，以及 Tushare SDK `ts_api` 和 Pro 客户端 `pro`，
 导入前配置 `TUSHARE_TOKEN`；不会在导入时发起数据请求。未使用 Tushare 时无需配置其 token。
 
 `query`、`backtest` 分别直接导出 Arena 的 `execute_query`、`run_backtest`，参数和结果保持 Arena 原样。
@@ -46,7 +90,7 @@ DolphinDB 数据源仅导出 Arena 的 `query`、`backtest`。Tushare 仅导出�
 需要保留的 DataFrame 在 `with` 内读取。Arena DSL 类型从 `runtime.apps.query` 导入。
 
 ```python
-from scheme.data.dolphindb import query, backtest
+from scheme.data import query, backtest
 
 request = {
     "start_date": "2026-06-01", "end_date": "2026-06-02",
@@ -66,19 +110,49 @@ with backtest(request, callbacks, config={"cash": 100000}) as result:
 Arena 的 `backtest` 会通过 Tushare 读取股票元数据，因此还需配置 `TUSHARE_TOKEN`。
 
 ```python
-from scheme.apps.factor import FactorAnalysisParameters, analyze_factors
-from scheme.apps.backtest import BacktestParameters, run_backtest
+from scheme import StockPool, Universe
+from scheme.base import FactorAnalysisParams, FactorReportForm
+from scheme.execute.strategy import BacktestParameters, run_backtest
 
-report = analyze_factors(factor, FactorAnalysisParameters(
+form = FactorReportForm(
     start="2025-01-01", end="2026-01-01", columns=["momentum"],
-))
-report.preview("information_coefficient")
+    pool=StockPool.CSI300,
+)
+params = form.build()
+report = params.run(Factor)  # 传入项目的 Factor 类，自动构造 FactorParams。
+report.show()
 report.save(output_path)
+
+# 自定义股票池等分析参数时，可直接构造，无需经过表单。
+params = FactorAnalysisParams(
+    start="2025-01-01", end="2026-01-01", columns=["momentum"],
+    universe=Universe(
+        codes=["000001.SZ"],
+        derivatives={"member": {"type": "DIRECT", "op": "nullary.true", "fields": {}}},
+        filters=["member"],
+    ),
+)
+report = params.run(Factor)
 
 report = run_backtest(algos, ctx, BacktestParameters(
     start="2025-01-01", end="2026-01-01", symbols=["000001.XSHE"],
 ))
+report.show()
 ```
+
+`report.show()` 在 Notebook 中展示内置的完整交互页面，直接复用 Solo 前端的
+`FactorAnalysisReport` 和 `BacktestReport`，包括图表、统计指标、日期筛选、收益周期切换、
+回测明细表的筛选/排序/分页/导出和日夜模式。因子分析结果自动保留分析参数，不需要重复传入。
+可设置 `height=1000`、`theme="dark"`；回测支持 `annual_trading_days=252` 和 `risk_free_rate=0.0`。
+`report.preview(name)` 仍用于直接查看 DataFrame。
+
+`Path("report.html").write_text(report.to_html(), encoding="utf-8")` 可导出独立交互报告。
+页面、DuckDB WASM、图表组件及数据全部内嵌，不连接前端服务或 CDN；保存 Notebook 输出会包含这些资源。
+Notebook 需使用可信输出，Kernel 需安装 IPython（项目的 ipykernel 已包含）。
+
+维护报告页面时，在工作区 `frontend` 执行 `npm ci`、`npm run build:scheme`，
+把同一套前端组件编译到 `scheme/report/assets`，然后构建 Scheme wheel。
+运行或安装 Scheme 不需要 Node.js、前端源码或单独服务。
 
 所有日期采用 [start, end)，回测入口转换为插件的包含结束日配置。日线合成每日开盘、收盘两份快照，
 要求真实涨跌停价，不使用当日高低价推算开盘可见范围；合成盘口近似无限流动性，不用于衡量真实冲击成本。
@@ -93,13 +167,13 @@ Factor 面板上传后，在同一 DolphinDB 会话内拼接收益率、过滤�
 评价交易日轴由 calendar_symbol（默认沪深300）行情确定，缺少基准数据报错。
 未来收益只进入评价，不能传给 Model。默认风险平价缺少历史样本或求解失败时退化等权并记录原因。
 
-scheme.Backtest 初始化正序，每次事件先逆序触发回调，再正序调用各环节 process，重复直到没有可消费的消息。Context 变化不伪造事件回调。
+策略回测驱动初始化正序，每次事件先逆序触发回调，再正序调用各环节 process，重复直到没有可消费的消息。Context 变化不伪造事件回调。
 JSON 中按 Model、Optimize、Control、Execution 组装。null 后续环节使用默认 Algo。
 组件字段由 scheme.AlgoComponents 定义，顺序和默认算法由 scheme.Strategy 维护。scheme 的 CLI 仅加载已指定的包并传入 Strategy，不维护默认算法实现。默认风险平价直接使用 scheme 声明的 arena-runtime 查询依赖，scheme 不依赖 solo-runtime。
 
 ```python
 from scheme import Strategy
-from scheme.apps.backtest import run_backtest
+from scheme.execute.strategy import run_backtest
 
 strategy = Strategy(ctx, params=parameters, model=MyModel, optimize=MyOptimize)
 report = run_backtest(strategy.algos, strategy.ctx, parameters)

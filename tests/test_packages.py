@@ -6,8 +6,9 @@ import pytest
 from pydantic import BaseModel
 
 from scheme import Algo, ResearchContext
-from scheme.utils.packages import validate_context, verify_component
-from scheme.utils.schema import Component
+from scheme.execute.packages import verify_component
+from scheme.execute.schema import Component
+from scheme.execute.strategy.assembly import validate_context
 
 
 @pytest.fixture
@@ -23,8 +24,8 @@ def candidate(tmp_path, monkeypatch):
     dist = SimpleNamespace(
         version="1.0.0", requires=["scheme>=1,<2"], locate_file=lambda p: installed / p
     )
-    monkeypatch.setattr("scheme.utils.packages.metadata.distribution", lambda _: dist)
-    monkeypatch.setattr("scheme.utils.packages.metadata.version", lambda _: "1.0.0")
+    monkeypatch.setattr("scheme.execute.packages.metadata.distribution", lambda _: dist)
+    monkeypatch.setattr("scheme.execute.packages.metadata.version", lambda _: "1.0.0")
     component = Component(
         package="demo",
         version="1.0.0",

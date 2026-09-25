@@ -10,11 +10,23 @@ from pathlib import Path
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="scheme")
-    parser.add_argument("command", choices=["run"])
-    parser.add_argument("--input", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("command", choices=["run", "parameters"])
+    parser.add_argument("--input", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--project", type=Path)
+    parser.add_argument("--validate", action="store_true")
     arguments = parser.parse_args(argv)
     try:
+        if arguments.command == "parameters":
+            from .parameters import inspect_project
+
+            if arguments.project is None:
+                raise ValueError("parameters 需要 --project")
+            values = json.load(sys.stdin) if arguments.validate else None
+            print(json.dumps(inspect_project(arguments.project.resolve(), values), ensure_ascii=False))
+            return 0
+        if arguments.input is None or arguments.output is None:
+            raise ValueError("run 需要 --input 和 --output")
         input_file = arguments.input.resolve()
         source = input_file.read_bytes()
         data = json.loads(source)
@@ -32,7 +44,8 @@ def main(argv: list[str] | None = None) -> int:
         for component in components:
             if component is not None and not component["wheel"].startswith("https://"):
                 component["wheel"] = str((input_file.parent / component["wheel"]).resolve())
-        return import_module(f"scheme.manage.apps.{kind}").run(
+        module = "strategy" if kind == "backtest" else "factor"
+        return import_module(f"scheme.execute.{module}.task").run(
             data, input_sha256=hashlib.sha256(source).hexdigest()
         )
     except Exception as error:

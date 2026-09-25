@@ -12,8 +12,8 @@ dependencies = [
     "pyarrow>=21",
     "packaging>=24",
     "tushare>=1.4.29,<2",
-    "backtest @ git+https://github.com/Genesis-Quant/backtest@d6ea13caec7f049ac32b715486636f38fccfab79",
-    "arena-runtime @ git+https://github.com/Genesis-Quant/runtime@eeebfe417aa999fa1e386cbd62b74326a5dab66c",
+    "backtest @ git+https://gitee.com/genesis-quant/backtest@d6ea13caec7f049ac32b715486636f38fccfab79",
+    "arena-runtime @ git+https://gitee.com/genesis-quant/arena-runtime@eeebfe417aa999fa1e386cbd62b74326a5dab66c",
 ]
 
 [project.scripts]

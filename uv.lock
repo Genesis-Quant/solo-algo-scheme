@@ -14,7 +14,7 @@ wheels = [
 [[package]]
 name = "arena-runtime"
 version = "0.1.0"
-source = { git = "https://github.com/Genesis-Quant/runtime?rev=eeebfe417aa999fa1e386cbd62b74326a5dab66c#eeebfe417aa999fa1e386cbd62b74326a5dab66c" }
+source = { git = "https://gitee.com/genesis-quant/arena-runtime?rev=eeebfe417aa999fa1e386cbd62b74326a5dab66c#eeebfe417aa999fa1e386cbd62b74326a5dab66c" }
 dependencies = [
     { name = "boto3" },
     { name = "dolphindb" },
@@ -30,7 +30,7 @@ dependencies = [
 [[package]]
 name = "backtest"
 version = "0.1.0"
-source = { git = "https://github.com/Genesis-Quant/backtest?rev=d6ea13caec7f049ac32b715486636f38fccfab79#d6ea13caec7f049ac32b715486636f38fccfab79" }
+source = { git = "https://gitee.com/genesis-quant/backtest?rev=d6ea13caec7f049ac32b715486636f38fccfab79#d6ea13caec7f049ac32b715486636f38fccfab79" }
 dependencies = [
     { name = "dolphindb" },
     { name = "numpy" },
@@ -492,8 +492,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "arena-runtime", git = "https://github.com/Genesis-Quant/runtime?rev=eeebfe417aa999fa1e386cbd62b74326a5dab66c" },
-    { name = "backtest", git = "https://github.com/Genesis-Quant/backtest?rev=d6ea13caec7f049ac32b715486636f38fccfab79" },
+    { name = "arena-runtime", git = "https://gitee.com/genesis-quant/arena-runtime?rev=eeebfe417aa999fa1e386cbd62b74326a5dab66c" },
+    { name = "backtest", git = "https://gitee.com/genesis-quant/backtest?rev=d6ea13caec7f049ac32b715486636f38fccfab79" },
     { name = "numpy", specifier = ">=2,<3" },
     { name = "packaging", specifier = ">=24" },
     { name = "pandas", specifier = ">=2.2,<3" },

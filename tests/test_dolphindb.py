@@ -24,9 +24,9 @@ from scheme import (
     ResearchContext,
     TradeReport,
 )
-from scheme.apps.backtest import BacktestParameters, ResearchBacktest, run_backtest
-from scheme.apps.factor import FactorAnalysisParameters, analyze_factors
 from scheme.config import DolphinSettings
+from scheme.execute.factor import FactorAnalysisParams, analyze_factors
+from scheme.execute.strategy import BacktestParameters, ResearchBacktest, run_backtest
 
 pytestmark = pytest.mark.skipif(
     os.getenv("SOLO_TEST_DOLPHIN") != "1", reason="需要显式开启真实 DolphinDB 测试"
@@ -180,10 +180,10 @@ def test_real_factor_statistics(monkeypatch, tmp_path, weight):
         )
         return nullcontext(SimpleNamespace(data_ref="testReturns"))
 
-    monkeypatch.setattr("scheme.apps.factor.api.query", query_prices)
+    monkeypatch.setattr("scheme.execute.factor.api.query", query_prices)
     result = analyze_factors(
         TestFactor(FactorParams(start="2025-01-02", end="2025-01-04")),
-        FactorAnalysisParameters(
+        FactorAnalysisParams(
             start="2025-01-02",
             end="2025-01-04",
             columns=["score"],
@@ -213,7 +213,7 @@ def test_real_factor_statistics(monkeypatch, tmp_path, weight):
 def test_real_factor_query_pipeline():
     result = analyze_factors(
         TestFactor(FactorParams(start="2026-06-01", end="2026-06-03")),
-        FactorAnalysisParameters(
+        FactorAnalysisParams(
             start="2026-06-01",
             end="2026-06-03",
             columns=["score"],

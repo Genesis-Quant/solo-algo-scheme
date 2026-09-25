@@ -6,14 +6,23 @@ import pandas as pd
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from scheme import Algo, Factor, FactorParams, ResearchContext
-from scheme.apps.backtest.schema import BacktestParameters, BacktestTask
-from scheme.apps.factor.api import prepare_panel
-from scheme.apps.factor.schema import FactorAnalysisParameters
-from scheme.defaults import risk_parity
+from scheme import Algo, Factor, FactorParams, ResearchContext, StockPool, Universe
+from scheme.base import (
+    BacktestParameters,
+    ControlReportForm,
+    ExecutionReportForm,
+    FactorAnalysisParams,
+    FactorReportForm,
+    ModelReportForm,
+    OptimizeReportForm,
+    ReportForm,
+)
+from scheme.base.projects.optimize.default import risk_parity
+from scheme.execute.factor.api import prepare_panel
+from scheme.execute.packages import load_entry, validate_environment
+from scheme.execute.schema import BacktestTask, Environment
+from scheme.execute.strategy.assembly import parameter_type
 from scheme.manage import main
-from scheme.utils.packages import load_entry, parameter_type, validate_environment
-from scheme.utils.schema import Environment
 
 
 class Params(BaseModel):
@@ -43,7 +52,7 @@ def test_parameter_generic_inheritance():
 
 
 def test_factor_preserves_panel_values():
-    parameters = FactorAnalysisParameters(
+    parameters = FactorAnalysisParams(
         start="2025-01-01", end="2025-01-03", columns=["f"], return_periods=[1], groups=2
     )
     panel = ExampleFactor(parameters).compute(parameters.start, parameters.end)
@@ -53,10 +62,80 @@ def test_factor_preserves_panel_values():
 
 
 def test_factor_rejects_duplicate_panel():
-    params = FactorAnalysisParameters(start="2025-01-01", end="2025-01-02", columns=["f"])
+    params = FactorAnalysisParams(start="2025-01-01", end="2025-01-02", columns=["f"])
     panel = ExampleFactor(params).compute(params.start, params.end)
     with pytest.raises(ValueError, match="唯一"):
         prepare_panel(pd.concat([panel, panel]), params)
+
+
+def test_factor_report_form_build_and_run(monkeypatch):
+    form = FactorReportForm(
+        start="2025-01-01",
+        end="2025-01-03",
+        columns=["f"],
+        pool=StockPool.CSI300,
+        groups=3,
+        return_periods=[1, 5],
+    )
+    params = form.build()
+    assert isinstance(params, FactorAnalysisParams)
+    assert params.universe.pool == StockPool.CSI300
+    assert params.universe.query(params.start, params.end).model_dump()["filters"] == [
+        "stock_pool_member"
+    ]
+    received = {}
+    report = object()
+
+    def analyze(factor, analysis, *, settings):
+        received.update(factor=factor, analysis=analysis, settings=settings)
+        return report
+
+    monkeypatch.setattr("scheme.execute.factor.api.analyze_factors", analyze)
+    assert params.run(ExampleFactor) is report
+    assert received["analysis"] is params
+    assert type(received["factor"].params) is FactorParams
+    assert set(received["factor"].params.model_dump()) == {"start", "end", "universe"}
+    assert received["factor"].params.universe == params.universe
+    with pytest.raises(TypeError, match="Factor 类"):
+        params.run(ExampleFactor(params.factor_params))
+
+
+def test_factor_analysis_accepts_custom_universe():
+    universe = Universe(
+        codes=["000001.SZ"],
+        derivatives={"member": {"type": "DIRECT", "op": "nullary.true", "fields": {}}},
+        filters=["member"],
+    )
+    params = FactorAnalysisParams(
+        start="2025-01-01",
+        end="2025-01-03",
+        columns=["f"],
+        universe=universe,
+    )
+    assert params.factor_params.universe.codes == ["000001.SZ"]
+    with pytest.raises(ValidationError):
+        FactorReportForm(start="2025-01-01", end="2025-01-03", columns=["f"], pool=StockPool.CUSTOM)
+
+
+@pytest.mark.parametrize(
+    "form_type", [ModelReportForm, OptimizeReportForm, ControlReportForm, ExecutionReportForm]
+)
+def test_strategy_project_forms_require_their_own_build(form_type):
+    assert form_type.model_fields == {}
+    with pytest.raises(TypeError, match="abstract"):
+        form_type()
+
+    class ProjectForm(form_type[Params]):
+        count: int = 2
+
+        def build(self) -> Params:
+            return Params(count=self.count)
+
+    form = ProjectForm(count=5)
+    assert isinstance(form, ReportForm)
+    assert isinstance(form, form_type[Params])
+    assert form_type[Params].__pydantic_generic_metadata__["args"] == (Params,)
+    assert form.build() == Params(count=5)
 
 
 def test_risk_parity_equal_risk_and_fallback():
