@@ -1,11 +1,13 @@
-"""Model 项目的研究报告表单接口。"""
+"""Model 研究表单：回测设置与默认后续算法。"""
 
-from pydantic import BaseModel
-
+from scheme.base.internal.backtest_form import BacktestForm
 from scheme.base.internal.form import ReportForm
+
+from .params import DefaultAlgos, ModelAnalysisParams
 
 __all__ = ["ModelReportForm"]
 
 
-class ModelReportForm[P: BaseModel](ReportForm[P]):
-    """具体字段与 build() 由该项目后续定义。"""
+class ModelReportForm(DefaultAlgos, BacktestForm, ReportForm[ModelAnalysisParams]):
+    def build(self) -> ModelAnalysisParams:
+        return ModelAnalysisParams(**self.backtest_values())

@@ -24,6 +24,7 @@ from scheme import (
     ResearchContext,
     TradeReport,
 )
+from scheme.base import ModelAlgo, ModelParams, ModelReportForm
 from scheme.config import DolphinSettings
 from scheme.execute.factor import FactorAnalysisParams, analyze_factors
 from scheme.execute.strategy import BacktestParameters, ResearchBacktest, run_backtest
@@ -100,6 +101,42 @@ def test_real_direct_order_and_parquet(tmp_path):
     assert result.daily_portfolios.iloc[-1].totalEquity == pytest.approx(100100.0)
     for path in result.save(tmp_path):
         pd.read_parquet(path)
+
+
+def test_model_form_default_chain_with_real_matching(monkeypatch, tmp_path):
+    class SignalModel(ModelAlgo[ModelParams, State]):
+        def on_snapshot(self, msg: DosVar) -> None:
+            if not self.ctx.sent:
+                self.ctx.signal = {"000001.SZ": 1.0}
+                self.ctx.sent = True
+
+        def on_trade(self, trades: Sequence[TradeReport]) -> None:
+            self.ctx.fills += sum(t.tradeQty for t in trades)
+
+    # 唯一股票的历史样本不足，默认风险平价明确退化为等权。
+    monkeypatch.setattr(
+        "scheme.base.projects.optimize.default.query",
+        lambda _: nullcontext(
+            SimpleNamespace(data=pd.DataFrame(columns=["code", "close", "adj_factor"]))
+        ),
+    )
+    monkeypatch.setattr(ResearchBacktest, "load_messages", SyntheticBacktest.load_messages)
+    params = ModelReportForm(
+        start="2025-01-02",
+        end="2025-01-03",
+        cash=100_000,
+        commission=0,
+        tax=0,
+        benchmark=None,
+    ).build()
+    params.symbols = ["000001.XSHE"]
+    state = State()
+    result = params.run(SignalModel, ctx=state)
+    assert state.fills == 9800
+    assert state.signal is None and state.target is None and state.orders is None
+    assert result.daily_portfolios.iloc[-1].totalEquity == pytest.approx(109800)
+    assert result.allocation_diagnostics.method.tolist() == ["equal_weight"]
+    assert len(result.save(tmp_path)) == 5
 
 
 class SyntheticTickBacktest(ResearchBacktest[State]):

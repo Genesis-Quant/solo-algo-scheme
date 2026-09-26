@@ -3,6 +3,7 @@
 import importlib
 import sys
 import tomllib
+from importlib import metadata as packages
 from pathlib import Path
 from typing import Any
 
@@ -65,8 +66,26 @@ def inspect_project(directory: Path, values: dict | None = None) -> dict:
     if values is not None:
         analysis = form_type.model_validate(values["form"]).build()
         if algo_base is not Factor:
+            from scheme.execute.strategy.components import BASES, research_components
+
+            kind = next(name for name, base in BASES.items() if base is algo_base)
+            components = research_components(analysis, kind, algo_type)
+            upstream = {}
+            for name in components:
+                if name == kind:
+                    continue
+                entry = getattr(analysis, name)
+                package = entry.split(":")[0].replace("_", "-")
+                dist = packages.distribution(package)
+                upstream[name] = {
+                    "package": dist.metadata["Name"],
+                    "version": dist.version,
+                    "entry": entry,
+                }
             return {
                 "entry": f"{module_name}:{algo_base.__name__}",
+                "project_kind": kind,
+                "upstream": upstream,
                 "backtest": analysis.model_dump(mode="json"),
             }
         return {
@@ -75,9 +94,16 @@ def inspect_project(directory: Path, values: dict | None = None) -> dict:
             "analysis": analysis.model_dump(mode="json"),
         }
 
+    schema = form_type.model_json_schema()
+    from scheme.execute.strategy.components import algo_options
+
+    for field in schema.get("properties", {}).values():
+        if kind := field.get("x-algo-kind"):
+            options = algo_options(kind)
+            field.update(enum=list(options), **{"x-enum-labels": list(options.values())})
     return {
         "protocol": 2,
         "title": "保存版本 · 研究参数",
-        "schemas": {"form": form_type.model_json_schema()},
+        "schemas": {"form": schema},
         "values": {"form": defaults(form_type)},
     }

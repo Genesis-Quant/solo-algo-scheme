@@ -1,11 +1,13 @@
-"""Execution 项目的研究报告表单接口。"""
+"""Execution 项目的回测报告表单。"""
 
-from pydantic import BaseModel
-
+from scheme.base.internal.backtest_form import BacktestForm
 from scheme.base.internal.form import ReportForm
+
+from .params import ExecutionAnalysisParams, ExecutionComponents
 
 __all__ = ["ExecutionReportForm"]
 
 
-class ExecutionReportForm[P: BaseModel](ReportForm[P]):
-    """具体字段与 build() 由该项目后续定义。"""
+class ExecutionReportForm(ExecutionComponents, BacktestForm, ReportForm[ExecutionAnalysisParams]):
+    def build(self) -> ExecutionAnalysisParams:
+        return ExecutionAnalysisParams(**self.backtest_values())

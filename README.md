@@ -23,6 +23,10 @@ scheme/
 ├── report/      # 共用 Notebook/HTML 展示和前端资源
 ├── execute/
 │   ├── factor/    # 因子分析、结果和正式任务入口
+│   ├── model/     # 策略建模任务入口
+│   ├── optimize/  # 组合优化任务入口
+│   ├── control/   # 订单风控任务入口
+│   ├── execution/ # 算法下单任务入口
 │   ├── strategy/  # 策略组装、回测驱动、结果和正式任务入口
 │   └── ...        # 共用任务协议、包校验、结果保存
 ├── manage/         # CLI 入口、项目表单模型发现
@@ -42,10 +46,33 @@ scheme/
 公共入口由 `base/__init__.py` 的显式导入和 `__all__` 定义，不要求调用方了解内部目录。
 因子目录导出 Factor、FactorParams、FactorAnalysisParams 和 FactorReportForm。
 四类策略项目的 Params 由项目继承并定义具体算法字段，统一从 StrategyParams 中取值。
-ModelReportForm、OptimizeReportForm、ControlReportForm、ExecutionReportForm 当前仅继承
+OptimizeReportForm、ControlReportForm、ExecutionReportForm 当前仅继承
 ReportForm 抽象接口，不预设研究字段，也未实现 build()；各项目后续独立定义。
 FactorReportForm 已实现字段及 build()，返回 FactorAnalysisParams。
+ModelReportForm 已实现股票池、日期、回测配置和后续 Algo 选项；build() 返回
+ModelAnalysisParams，调用 params.run(ModelAlgo) 组装并运行完整策略。
+首批内置选项为 risk_parity（风险平价）、no_control（不风控）、direct_execution（不拆单）。
+Context 从 ModelAlgo 的泛型解析，也可通过 run(..., ctx=实例) 传入。
+项目表单可继承 ModelReportForm 增加算法字段，统一参数由各 Algo 的 Params 读取。
 `scheme parameters` 读取项目导出的对应 ReportForm，生成 JSON Schema 并校验输入。
+
+```python
+from model import ModelAlgo, ModelReportForm
+from scheme import StockPool
+
+form = ModelReportForm(
+    start="2026-06-01", end="2026-06-06",
+    pool=StockPool.SSE50, optimize="risk_parity",
+    control="no_control", execution="direct_execution",
+)
+params = form.build()
+report = params.run(ModelAlgo)
+report.show()
+```
+
+Model 保存版本与因子共用源码快照和候选 wheel 流程；输入 kind 为 model，
+algos.model 指向冻结的候选包，backtest 保存表单构建后的参数和后续 Algo 选择。
+Worker 使用锁文件中的 Scheme 默认实现；显式指定的下游包优先于默认实现。
 
 同一 Scheme 大版本内，Factor/Algo 基类、Context、事件与消息消费语义、CLI 输入以及报告文件结构保持兼容；破坏性修改必须升级大版本。Algo 包主版本与 Scheme 一致，小版本可独立迭代，必须声明整个大版本依赖范围（例如 `scheme>=1.0.0,<2.0.0`），不得把开发时的精确版本或 Git commit 写进 wheel 的依赖。项目和正式任务使用 uv source 与锁文件固定实际版本。其他共享依赖也须维持可共同解析的范围。
 
@@ -61,7 +88,8 @@ scheme run --input /shared/tasks/123/input.json --output /shared/tasks/123/repor
 
 正式调用发生在任务锁定的 uv 环境中。启动器 Runtime 只安装任务依赖并调用上面的固定 CLI。
 输入中的 environment 只含 lockfile，研究包 wheel 的身份、哈希、scheme 兼容范围及实际环境由 scheme 校验。
-kind=factor/backtest 分别执行因子分析和策略回测，输出 Parquet，最后原子写入协议版本 1 的 run.json。
+kind 分别为 factor、model、optimize、control、execution、strategy，对应各自执行入口；strategy 用于完整策略组装。当前除 factor 外，各入口暂时复用回测报告实现。
+报告类型由结果对象决定，单独写入 run.json 的 report_kind，任务 kind 始终保留原值。输出 Parquet 后，最后原子写入协议版本 1 的 run.json。
 完成清单包含原始输入、锁文件和各报告文件的 SHA256，以及实际安装版本。
 完整输入示例位于根工作区 runtime/examples，进程协议见 runtime/README.md。
 
@@ -231,3 +259,28 @@ target 为 dict[Asset, float]，表示完整目标资产权重，以账户权益
 验证：`uv run pytest` 默认执行无需服务的测试；设置 `SOLO_TEST_DOLPHIN=1` 并提供以上连接变量后，
 会额外执行真实 DolphinDB 的因子统计、日线合成快照与 tick 字段转换/成交记账测试。
 这些确定性测试只在各自会话中构造行情，不写入基础数据表。
+
+
+### 组合、风控与执行研究
+
+`OptimizeReportForm`、`ControlReportForm`、`ExecutionReportForm` 各自生成对应的 AnalysisParams，
+`params.run(当前项目 Algo)` 只替换当前环节。上游字段选择插件已安装的项目入口；后续环节使用表单中的默认算法。
+`scheme.algo_options("model")` 等函数返回同 Scheme 大版本的已安装包选项，插件也使用这些选项生成下拉框。
+Control 选择 Model、Optimize；Execution 选择 Model、Optimize、Control；不会把默认算法当作已选的上游项目。
+
+```python
+from optimize import OptimizeAlgo, OptimizeReportForm
+from scheme import algo_options
+
+models = algo_options("model")  # {"model_<项目ID>:ModelAlgo": "包名 · 版本"}
+form = OptimizeReportForm(
+    start="2026-06-01", end="2026-06-06",
+    model=next(iter(models)),  # 可替换为 models 中指定的入口
+    control="no_control", execution="direct_execution",
+)
+report = form.build().run(OptimizeAlgo)
+report.show()
+```
+
+三个项目目前均输出与 Model 相同的完整回测报告。正式保存会将当前包、所有选择的上游包及传递依赖冻结为 wheel，
+记录包版本、入口和 SHA256；Worker 使用冻结环境运行，读取当前项目对应的候选包，而不是把它误当成 Model。

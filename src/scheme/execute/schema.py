@@ -1,7 +1,7 @@
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from scheme.base import BacktestParameters, FactorAnalysisParams
 from scheme.execute.strategy.assembly import AlgoComponents
@@ -28,7 +28,7 @@ class Component(Package):
 
 
 class Task(StrictModel):
-    kind: Literal["factor", "backtest"]
+    kind: Literal["factor", "model", "optimize", "control", "execution", "strategy"]
     environment: Environment
     output: Path
 
@@ -39,8 +39,33 @@ class FactorTask(Task):
     analysis: FactorAnalysisParams
 
 
-class BacktestTask(Task):
-    kind: Literal["backtest"] = "backtest"
+class AlgoTask(Task):
     algos: AlgoComponents[Package]
-    context: str = Field(pattern=r"^[A-Za-z_][\w.]*:[A-Za-z_]\w*$")
+    context: str | None = Field(default=None, pattern=r"^[A-Za-z_][\w.]*:[A-Za-z_]\w*$")
     backtest: BacktestParameters
+
+    @model_validator(mode="after")
+    def require_research_component(self) -> Self:
+        if self.kind in {"model", "optimize", "control", "execution"} and getattr(self.algos, self.kind) is None:
+            raise ValueError(f"{self.kind} 研究任务必须提供当前环节的 Algo")
+        return self
+
+
+class ModelTask(AlgoTask):
+    kind: Literal["model"] = "model"
+
+
+class OptimizeTask(AlgoTask):
+    kind: Literal["optimize"] = "optimize"
+
+
+class ControlTask(AlgoTask):
+    kind: Literal["control"] = "control"
+
+
+class ExecutionTask(AlgoTask):
+    kind: Literal["execution"] = "execution"
+
+
+class StrategyTask(AlgoTask):
+    kind: Literal["strategy"] = "strategy"

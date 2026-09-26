@@ -40,8 +40,10 @@ from .base import (
 )
 from .data.dolphindb.universe import StockPool, Universe
 from .execute.strategy.assembly import AlgoComponents, Strategy
+from .execute.strategy.components import algo_options
 
 __all__ = [
+    "algo_options",
     "Algo",
     "AlgoComponents",
     "AlgoPriceType",

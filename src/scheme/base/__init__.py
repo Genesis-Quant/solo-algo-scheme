@@ -5,19 +5,31 @@ from .internal.context import ResearchContext
 from .internal.form import ReportForm
 from .internal.params import BacktestParameters, StrategyParams
 from .internal.types import Asset, Order, Signal, Target
-from .projects.control import ControlAlgo, ControlParams, ControlReportForm
-from .projects.execution import ExecutionAlgo, ExecutionParams, ExecutionReportForm
+from .projects.control import ControlAlgo, ControlAnalysisParams, ControlParams, ControlReportForm
+from .projects.execution import (
+    ExecutionAlgo,
+    ExecutionAnalysisParams,
+    ExecutionParams,
+    ExecutionReportForm,
+)
 from .projects.factor import Factor, FactorAnalysisParams, FactorParams, FactorReportForm
-from .projects.model import ModelAlgo, ModelParams, ModelReportForm
-from .projects.optimize import OptimizeAlgo, OptimizeParams, OptimizeReportForm
+from .projects.model import ModelAlgo, ModelAnalysisParams, ModelParams, ModelReportForm
+from .projects.optimize import (
+    OptimizeAlgo,
+    OptimizeAnalysisParams,
+    OptimizeParams,
+    OptimizeReportForm,
+)
 
 __all__ = [
     "Algo",
     "Asset",
     "ControlAlgo",
+    "ControlAnalysisParams",
     "ControlParams",
     "ControlReportForm",
     "ExecutionAlgo",
+    "ExecutionAnalysisParams",
     "ExecutionParams",
     "ExecutionReportForm",
     "Factor",
@@ -25,9 +37,11 @@ __all__ = [
     "FactorAnalysisParams",
     "FactorReportForm",
     "ModelAlgo",
+    "ModelAnalysisParams",
     "ModelParams",
     "ModelReportForm",
     "OptimizeAlgo",
+    "OptimizeAnalysisParams",
     "OptimizeParams",
     "OptimizeReportForm",
     "Order",

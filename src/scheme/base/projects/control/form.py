@@ -1,11 +1,13 @@
-"""Control 项目的研究报告表单接口。"""
+"""Control 项目的回测报告表单。"""
 
-from pydantic import BaseModel
-
+from scheme.base.internal.backtest_form import BacktestForm
 from scheme.base.internal.form import ReportForm
+
+from .params import ControlAnalysisParams, ControlComponents
 
 __all__ = ["ControlReportForm"]
 
 
-class ControlReportForm[P: BaseModel](ReportForm[P]):
-    """具体字段与 build() 由该项目后续定义。"""
+class ControlReportForm(ControlComponents, BacktestForm, ReportForm[ControlAnalysisParams]):
+    def build(self) -> ControlAnalysisParams:
+        return ControlAnalysisParams(**self.backtest_values())

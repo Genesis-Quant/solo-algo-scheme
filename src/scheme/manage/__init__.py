@@ -7,6 +7,8 @@ import sys
 from importlib import import_module
 from pathlib import Path
 
+TASK_KINDS = ("factor", "model", "optimize", "control", "execution", "strategy")
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="scheme")
@@ -31,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
         source = input_file.read_bytes()
         data = json.loads(source)
         kind = data["kind"]
-        if kind not in {"factor", "backtest"}:
+        if kind not in TASK_KINDS:
             raise ValueError(f"不支持的研究类型：{kind}")
         output = (input_file.parent / data["output"]).resolve()
         if output != arguments.output.resolve():
@@ -44,8 +46,7 @@ def main(argv: list[str] | None = None) -> int:
         for component in components:
             if component is not None and not component["wheel"].startswith("https://"):
                 component["wheel"] = str((input_file.parent / component["wheel"]).resolve())
-        module = "strategy" if kind == "backtest" else "factor"
-        return import_module(f"scheme.execute.{module}.task").run(
+        return import_module(f"scheme.execute.{kind}.task").run(
             data, input_sha256=hashlib.sha256(source).hexdigest()
         )
     except Exception as error:

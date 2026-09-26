@@ -1,5 +1,5 @@
 from .algo import ModelAlgo
 from .form import ModelReportForm
-from .params import ModelParams
+from .params import ModelAnalysisParams, ModelParams
 
-__all__ = ["ModelAlgo", "ModelParams", "ModelReportForm"]
+__all__ = ["ModelAlgo", "ModelParams", "ModelAnalysisParams", "ModelReportForm"]

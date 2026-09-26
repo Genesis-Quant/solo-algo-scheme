@@ -1,5 +1,5 @@
 from .algo import ExecutionAlgo
 from .form import ExecutionReportForm
-from .params import ExecutionParams
+from .params import ExecutionAnalysisParams, ExecutionParams
 
-__all__ = ["ExecutionAlgo", "ExecutionParams", "ExecutionReportForm"]
+__all__ = ["ExecutionAlgo", "ExecutionParams", "ExecutionAnalysisParams", "ExecutionReportForm"]

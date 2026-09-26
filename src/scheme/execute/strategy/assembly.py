@@ -48,6 +48,13 @@ def parameter_type(cls: type) -> type[BaseModel]:
     return _generic_model(cls, 0)
 
 
+def context_type(cls: type) -> type[ResearchContext[Any]]:
+    context = _generic_model(cls, 1)
+    if not issubclass(context, ResearchContext):
+        raise TypeError("Model 上下文必须继承 ResearchContext")
+    return context
+
+
 def validate_context(algo: Any, ctx: BaseModel) -> None:
     expected = _generic_model(type(algo), 1)
     generic = getattr(expected, "__pydantic_generic_metadata__", {})

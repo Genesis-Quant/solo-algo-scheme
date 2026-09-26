@@ -1,5 +1,5 @@
 from .algo import OptimizeAlgo
 from .form import OptimizeReportForm
-from .params import OptimizeParams
+from .params import OptimizeAnalysisParams, OptimizeParams
 
-__all__ = ["OptimizeAlgo", "OptimizeParams", "OptimizeReportForm"]
+__all__ = ["OptimizeAlgo", "OptimizeParams", "OptimizeAnalysisParams", "OptimizeReportForm"]

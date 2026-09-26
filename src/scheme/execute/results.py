@@ -27,6 +27,7 @@ def save_run(task: Task, result: Report, versions: dict[str, str], *, input_sha2
                 "status": "success",
                 "input_sha256": input_sha256,
                 "input": task.model_dump(mode="json"),
+                "report_kind": result.report_kind,
                 "versions": versions,
                 "reports": result.filenames,
                 "report_sha256": hashes,
