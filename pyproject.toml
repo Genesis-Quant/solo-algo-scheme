@@ -1,6 +1,6 @@
 [project]
 name = "scheme"
-version = "1.0.0"
+version = "1.0.1"
 description = "Solo research interfaces, strategy assembly and execution."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
