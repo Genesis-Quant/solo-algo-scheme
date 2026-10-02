@@ -35,12 +35,12 @@ def prepare_panel(panel: pd.DataFrame, parameters: FactorAnalysisParams) -> pd.D
     return frame.sort_values(["time", "code"])
 
 
-def analyze_factors[P: FactorParams](
+def analyze_factors[P: FactorParams, A: FactorAnalysisParams](
     factor: Factor[P],
-    parameters: FactorAnalysisParams,
+    parameters: A,
     *,
     settings: DolphinSettings | None = None,
-) -> FactorAnalysisResult:
+) -> FactorAnalysisResult[A]:
     settings = settings or DolphinSettings.from_env()
     source = prepare_panel(factor.compute(parameters.start, parameters.end), parameters)
     with create_session(settings) as session:
@@ -134,7 +134,7 @@ def analyze_factors[P: FactorParams](
                     soloFactorProcessed[factorCol + "_group"] = soloRanks.factor_group
                 }}
             """)
-            return FactorAnalysisResult(
+            report = FactorAnalysisResult(
                 parameters=parameters.model_copy(deep=True),
                 processed_data=session.run("soloFactorProcessed"),
                 execution_statistics=session.run(
@@ -151,3 +151,4 @@ def analyze_factors[P: FactorParams](
                     'factor::factorGroupTurnover(soloFactorProcessed, soloFactors, soloPeriods, soloGroups, soloSelect, "time", "code", distinct(soloFactorSource.time))'
                 ),
             )
+    return report

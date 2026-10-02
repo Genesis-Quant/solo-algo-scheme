@@ -16,7 +16,7 @@ from backtest import (
 )
 from pydantic import BaseModel
 
-from scheme.base import Algo, BacktestParameters, ResearchContext
+from scheme.base import Algo, ResearchContext, StrategyAnalysisParams
 from scheme.config import DolphinSettings
 from scheme.data import query
 from scheme.data.dolphindb.symbols import engine_symbol, source_symbol
@@ -30,7 +30,7 @@ class ResearchBacktest[C: BaseModel](Backtest[C]):
     def __init__(
         self,
         settings: DolphinSettings,
-        parameters: BacktestParameters,
+        parameters: StrategyAnalysisParams,
         ctx: C,
         algos: Sequence[Algo[Any, C]],
     ) -> None:
@@ -143,14 +143,14 @@ def records_frame(records: Sequence[BaseModel], model: type[BaseModel]) -> pd.Da
     return pd.DataFrame([row.model_dump() for row in records], columns=list(model.model_fields))
 
 
-def run_backtest[C: ResearchContext[Any]](
+def run_backtest[C: ResearchContext[Any], A: StrategyAnalysisParams](
     algos: Sequence[Algo[Any, C]],
     ctx: C,
-    parameters: BacktestParameters,
+    parameters: A,
     *,
     settings: DolphinSettings | None = None,
     engine_type: type[ResearchBacktest[C]] = ResearchBacktest,
-) -> BacktestResult:
+) -> BacktestResult[A]:
     """逆序事件回调后正序消费 Context 消息；仍允许 Algo 直接下单。"""
     settings = settings or DolphinSettings.from_env()
     if not algos:
@@ -194,4 +194,5 @@ def run_backtest[C: ResearchContext[Any]](
                 engine.get_daily_trading_statistics(), DailyTradingStatistics
             ),
             allocation_diagnostics=pd.DataFrame(diagnostics, columns=["time", "method", "reason"]),
+            parameters=parameters.model_copy(deep=True),
         )

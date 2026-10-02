@@ -1,6 +1,6 @@
-"""面向插件和 Notebook 的预设选项；build 后得到完整分析参数。"""
+"""用于 UI 的因子分析表单。"""
 
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Literal
 
 from pydantic import Field
@@ -8,22 +8,32 @@ from pydantic import Field
 from scheme.base.internal.form import ReportForm
 from scheme.data.dolphindb.universe import StockPool, Universe
 
-from .params import AnalysisSettings, FactorAnalysisParams
+from .params import FactorAnalysisParams
 
 __all__ = ["FactorReportForm"]
 
 
-class FactorReportForm(AnalysisSettings, ReportForm[FactorAnalysisParams]):
-    """预设分析选项；插件根据该 Pydantic 模型生成输入表单。"""
-
+class FactorReportForm(ReportForm[FactorAnalysisParams]):
+    start: date = Field(title="开始日期")
+    end: date = Field(title="结束日期（不含）")
     pool: Literal[
         StockPool.ALL, StockPool.SSE50, StockPool.CSI300, StockPool.CSI500, StockPool.CSI1000
     ] = Field(default=StockPool.ALL, title="股票池")
     lookback: timedelta = Field(default=timedelta(0), title="回溯周期")
+    columns: list[str] = Field(min_length=1, title="因子列")
+    return_periods: list[int] = Field(
+        default_factory=lambda: [1, 5, 20], min_length=1, title="收益持有期"
+    )
+    groups: int = Field(default=5, ge=2, title="分组数量")
+    n_select: int = Field(default=10, ge=1, title="极端股票数")
+    weight: Literal["equal", "market_value"] = Field(
+        default="equal", title="加权方式",
+        json_schema_extra={"x-enum-labels": ["等权", "市值加权"]},
+    )
+    calendar_symbol: str = Field(default="000300.XSHG", title="交易日历代码")
 
     def build(self) -> FactorAnalysisParams:
-        """把预设股票池展开为可独立运行的分析参数。"""
         return FactorAnalysisParams(
             **self.model_dump(exclude={"pool", "lookback"}),
-            universe=Universe(pool=self.pool, lookback=self.lookback),
+            universe=Universe.model_validate({"pool": self.pool, "lookback": self.lookback}),
         )

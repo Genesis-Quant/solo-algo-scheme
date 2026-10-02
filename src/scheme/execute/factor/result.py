@@ -10,13 +10,13 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class FactorAnalysisResult(Report):
+class FactorAnalysisResult[P: "FactorAnalysisParams"](Report):
     processed_data: pd.DataFrame
     execution_statistics: pd.DataFrame
     information_coefficient: pd.DataFrame
     group_returns: pd.DataFrame
     group_turnover: pd.DataFrame
-    parameters: "FactorAnalysisParams | None" = field(default=None, repr=False)
+    parameters: P | None = field(default=None, repr=False)
 
     report_kind: ClassVar[str] = "factor"
 

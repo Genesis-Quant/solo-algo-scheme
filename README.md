@@ -42,19 +42,20 @@ scheme/
 项目可从 `scheme.base` 或 `scheme` 导入 Factor/Algo 等公共基类；
 从 `scheme.base` 导入 `FactorReportForm` 和 `FactorAnalysisParams`。
 
-每类项目统一从 `scheme.base` 导入对应的 Algo、Params 和 ReportForm；
+每类项目统一从 `scheme.base` 导入对应的 Algo、Params、AnalysisParams 和 `ReportForm`；
 公共入口由 `base/__init__.py` 的显式导入和 `__all__` 定义，不要求调用方了解内部目录。
-因子目录导出 Factor、FactorParams、FactorAnalysisParams 和 FactorReportForm。
-四类策略项目的 Params 由项目继承并定义具体算法字段，统一从 StrategyParams 中取值。
-OptimizeReportForm、ControlReportForm、ExecutionReportForm 当前仅继承
-ReportForm 抽象接口，不预设研究字段，也未实现 build()；各项目后续独立定义。
-FactorReportForm 已实现字段及 build()，返回 FactorAnalysisParams。
-ModelReportForm 已实现股票池、日期、回测配置和后续 Algo 选项；build() 返回
-ModelAnalysisParams，调用 params.run(ModelAlgo) 组装并运行完整策略。
-首批内置选项为 risk_parity（风险平价）、no_control（不风控）、direct_execution（不拆单）。
-Context 从 ModelAlgo 的泛型解析，也可通过 run(..., ctx=实例) 传入。
-项目表单可继承 ModelReportForm 增加算法字段，统一参数由各 Algo 的 Params 读取。
-`scheme parameters` 读取项目导出的对应 ReportForm，生成 JSON Schema 并校验输入。
+
+参数按三层职责组织：
+
+- `FactorParams`、`StrategyParams` 是构造因子和组装策略需要的运行参数，包含 `start`、`end`、`universe`。四类 Algo 的 Params 只声明自身算法字段，从统一策略参数提取，不携带回测配置。
+- `FactorAnalysisParams(FactorParams)` 增加 `columns`、`return_periods` 等分析选项，`StrategyAnalysisParams(StrategyParams)` 增加行情、基准和回测引擎设置；都实现 `run` 并返回报告。各环节的 `Model/Optimize/Control/ExecutionAnalysisParams` 直接继承对应的 Algo Params，增加独立研究所需的日期、股票池、回测设置和上游选择。
+- 所有 Form 只继承 `ReportForm[具体AnalysisParams]`，显式声明 UI 输入并实现 `build()`，把 `pool/lookback` 转换为 `Universe`、把资金费率转换为引擎配置。Form 不继承 Params 或 AnalysisParams，不执行研究；跨字段校验发生在 `build()` 构造分析参数时。
+
+项目自定义 AnalysisParams 同时继承本项目的具体 Params 与对应 Scheme AnalysisParams，保证算法字段是真正的 Pydantic 字段，而不是仅存在于额外字段中。项目 Form 的泛型和 `build()` 返回该具体 AnalysisParams。运行时根据 Factor/Algo 的参数泛型构造新的具体 Params，只传算法声明的字段，不把分析字段泄漏给算法。
+
+各项目导出对应的算法、Params、AnalysisParams 和 ReportForm。Factor 的 `params.run(Factor)` 接受类并自动构造其泛型声明的参数；四类 Algo 的 `params.run(当前Algo)` 根据上游选择组装完整策略。内置后续选项为 risk_parity（风险平价）、no_control（不风控）、direct_execution（不拆单）。Context 从 ModelAlgo 泛型解析，也可通过 `run(..., ctx=实例)` 传入。
+
+`run` 的结果泛型保留具体分析参数类型，报告的 `parameters` 保存该参数副本。`scheme parameters` 校验 `ReportForm` 声明的具体分析类型和 `build()` 结果，生成 JSON Schema；不会在定义或校验表单时调用 `run`。
 
 ```python
 from model import ModelAlgo, ModelReportForm
@@ -74,7 +75,13 @@ Model 保存版本与因子共用源码快照和候选 wheel 流程；输入 kin
 algos.model 指向冻结的候选包，backtest 保存表单构建后的参数和后续 Algo 选择。
 Worker 使用锁文件中的 Scheme 默认实现；显式指定的下游包优先于默认实现。
 
-同一 Scheme 大版本内，Factor/Algo 基类、Context、事件与消息消费语义、CLI 输入以及报告文件结构保持兼容；破坏性修改必须升级大版本。Algo 包主版本与 Scheme 一致，小版本可独立迭代，必须声明整个大版本依赖范围（例如 `scheme>=1.0.0,<2.0.0`），不得把开发时的精确版本或 Git commit 写进 wheel 的依赖。项目和正式任务使用 uv source 与锁文件固定实际版本。其他共享依赖也须维持可共同解析的范围。
+Algo 包主版本与 Scheme 一致，小版本可独立迭代。包声明经过验证的最低 Scheme 正式版本及下一大版本上界，例如 `scheme>=1.1.0,<2.0.0`；不接受精确版本、直接 Git/URL、条件依赖或跨大版本范围。模板选择与正式 wheel 校验都会检查实际 Scheme 版本满足该范围，项目 pin 不会降低模板的最低版本要求。项目和正式任务使用 uv source 与锁文件固定实际版本。其他共享依赖也须维持可共同解析的范围。
+
+### 1.1.0 参数接口迁移
+
+1.1.0 包含明确的 Python 参数接口调整，不是对 1.0.x 源码的无条件兼容升级。旧的 `BacktestParameters` 使用 `StrategyAnalysisParams` 替代，日期/Settings/Components 字段混入类已移除；项目按上面的 Param、AnalysisParams、ReportForm 结构迁移。新模板最低要求 Scheme 1.1.0，不能与 1.0.x 的表单发现入口混用。已有研究项目与历史任务继续使用原锁定的 Scheme commit，不自动升级、重写源码或锁文件；需要升级的项目必须先迁移源码并验证。
+
+1.1.0 保留任务 JSON 字段、报告文件结构和 Runtime 协议。参数投影保留 Pydantic 验证别名、运行时嵌套类型和非序列化字段；完整策略执行按已构造 Algo 的实际参数校验分析参数，包含默认值、类型转换及与分析配置同名的算法字段。报告保存具体 AnalysisParams 的深拷贝。
 
 组装时统一使用一个 Scheme 安装实例，按各 Algo 的参数模型校验统一参数，并校验 Context 类型。Context 赋值校验 Signal/Target/Order 类型；Model 的 Signal 业务结构仍须与 Optimize 一致，不能仅凭包版本推断信号含义。每次发布应验证跨小版本 Algo 的混合安装、组装及原有报告契约。
 
@@ -140,7 +147,7 @@ Arena 的 `backtest` 会通过 Tushare 读取股票元数据，因此还需配�
 ```python
 from scheme import StockPool, Universe
 from scheme.base import FactorAnalysisParams, FactorReportForm
-from scheme.execute.strategy import BacktestParameters, run_backtest
+from scheme.execute.strategy import StrategyAnalysisParams, run_backtest
 
 form = FactorReportForm(
     start="2025-01-01", end="2026-01-01", columns=["momentum"],
@@ -162,7 +169,7 @@ params = FactorAnalysisParams(
 )
 report = params.run(Factor)
 
-report = run_backtest(algos, ctx, BacktestParameters(
+report = run_backtest(algos, ctx, StrategyAnalysisParams(
     start="2025-01-01", end="2026-01-01", symbols=["000001.XSHE"],
 ))
 report.show()
@@ -201,19 +208,21 @@ JSON 中按 Model、Optimize、Control、Execution 组装。null 后续环节使
 
 ```python
 from scheme import Strategy
-from scheme.execute.strategy import run_backtest
+from scheme.base import StrategyParams, StrategyAnalysisParams
 
+parameters = StrategyParams(start="2026-06-01", end="2026-07-01", window=20)
 strategy = Strategy(ctx, params=parameters, model=MyModel, optimize=MyOptimize)
-report = run_backtest(strategy.algos, strategy.ctx, parameters)
+analysis = StrategyAnalysisParams(**parameters.model_dump(), config={"cash": 500_000})
+report = analysis.run(strategy)
 ```
 
-Strategy 接收 Algo 类，构造时将同一份 StrategyParams 转成每个 Algo 泛型声明的参数模型，再实例化 Algo。
+`Strategy[P, C]` 保留具体运行参数和 Context 类型。Strategy 接收 Algo 类，构造时将同一份 StrategyParams 转成每个 Algo 泛型声明的参数模型，再实例化 Algo。
 StrategyParams 允许额外字段，例如 `window=20`、`gross_exposure=0.8`；各 Algo 只读取自身参数模型声明的属性，
 保留默认值、类型转换和校验，同名参数共享同一个值。缺失必填参数或校验失败会在组装时报错。
 JSON 中所有 Algo 参数统一写在 `backtest`，`algos` 只描述包与入口，不再接受各自的 `params`。
 
-`scheme.FactorParams` 和 `scheme.StrategyParams` 定义公共的 `start`、`end`、`universe`；
-因子模板参数、因子分析参数和回测参数分别继承它们。`universe` 是必须包含非空 `filters` 的 Arena DSL，
+`scheme.FactorParams` 和 `scheme.StrategyParams` 各自定义所属运行领域的 `start`、`end`、`universe`；
+`FactorAnalysisParams`、`StrategyAnalysisParams` 分别直接继承它们，不通过额外的日期或 Settings 混入类间接拼接。`universe` 是必须包含非空 `filters` 的 Arena DSL，
 日期取外层 `[start, end)`；默认使用恒真过滤条件表示全市场。沪深300示例：
 
 ```python
@@ -241,7 +250,7 @@ panel = params.universe.evaluate(params.start, params.end)
 Factor 和 Strategy 的 `universe` 属性首次访问时查询并缓存这张面板。
 Algo 可通过 `self.backtest.universe` 读取；回测未指定 `symbols` 时按面板列名加载行情，
 每日是否选股由 Algo 根据对应日期的布尔值判断。显式 `symbols` 仅控制行情加载范围。
-CLI 因子任务将 `analysis` 的这三个公共参数传入 Factor；具体因子参数仍取 `factor.params`。
+CLI 因子任务以 `analysis` 的这三个公共参数为准，保留 `factor.params` 的自定义算法字段，再按具体 Factor 的泛型参数模型校验。表单序列化时把具体算法字段存入 `factor`，标准分析选项存入 `analysis`；不能被标准分析器执行的自定义分析字段会明确报错，不静默丢弃。
 
 默认 Optimize 只接受有符号数值 Signal；自定义结构必须配套 Optimize。
 Solo 研究链路统一使用 `.XSHG/.XSHE`：股票池、Signal、Target、行情、持仓与回报使用相同代码。

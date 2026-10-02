@@ -1,13 +1,15 @@
-"""Model 项目的算法参数基类。"""
+"""Model 项目的算法参数与回测分析参数。"""
 
-from typing import TYPE_CHECKING, Any, Literal
+from datetime import date
+from typing import TYPE_CHECKING, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from scheme.base.internal.params import BacktestParameters
+from scheme.base.internal.context import ResearchContext
+from scheme.base.internal.params import _all_market, validate_backtest, validate_research
+from scheme.data.dolphindb.universe import Universe
 
 if TYPE_CHECKING:
-    from scheme.base.internal.context import ResearchContext
     from scheme.config import DolphinSettings
     from scheme.execute.strategy.result import BacktestResult
 
@@ -22,9 +24,25 @@ class ModelParams(BaseModel):
     model_config = ConfigDict(extra="ignore", allow_inf_nan=False)
 
 
-class DefaultAlgos(BaseModel):
-    """策略研究可选的 Scheme 内置后续算法。"""
+class ModelAnalysisParams(ModelParams):
+    """完整策略研究参数；将 Model 和选中的后续 Algo 组装后运行。"""
 
+    model_config = ConfigDict(extra="allow", allow_inf_nan=False)
+
+    start: date = Field(title="开始日期")
+    end: date = Field(title="结束日期（不含）")
+    universe: Universe = Field(default_factory=_all_market, title="股票池设置")
+    market_data: Literal["stock_daily", "stock_snapshot"] = Field(
+        default="stock_daily",
+        title="行情类型",
+        json_schema_extra={"x-enum-labels": ["日频合成快照", "Tick 快照"]},
+    )
+    symbols: list[str] | None = Field(default=None, min_length=1, title="行情股票范围")
+    benchmark: str | None = Field(default=None, title="基准代码")
+    batch_days: int = Field(default=1, ge=1, title="行情加载批次天数")
+    config: dict[str, Any] = Field(
+        default_factory=lambda: {"cash": 1_000_000.0}, title="回测引擎配置"
+    )
     optimize: Literal["risk_parity"] = Field(
         default="risk_parity", title="组合优化", json_schema_extra={"x-enum-labels": ["风险平价"]}
     )
@@ -37,35 +55,19 @@ class DefaultAlgos(BaseModel):
         json_schema_extra={"x-enum-labels": ["不拆单"]},
     )
 
-    def default_algos(self) -> dict[str, type]:
-        from scheme.base.projects.control.default import NoControl
-        from scheme.base.projects.execution.default import DirectExecution
-        from scheme.base.projects.optimize.default import RiskParity
+    @model_validator(mode="after")
+    def validate_analysis(self) -> Self:
+        validate_research(self.start, self.end, self.universe)
+        self.symbols, self.benchmark = validate_backtest(self.config, self.symbols, self.benchmark)
+        return self
 
-        return {
-            "optimize": {"risk_parity": RiskParity}[self.optimize],
-            "control": {"no_control": NoControl}[self.control],
-            "execution": {"direct_execution": DirectExecution}[self.execution],
-        }
-
-
-class ModelAnalysisParams(BacktestParameters, DefaultAlgos):
-    """完整策略研究参数；将 Model 和选中的后续 Algo 组装后运行。"""
-
-    def run(
+    def run[P: ModelParams, C: ResearchContext[Any]](
         self,
-        model: "type[ModelAlgo[Any, Any]]",
+        algo: "type[ModelAlgo[P, C]]",
         *,
-        ctx: "ResearchContext[Any] | None" = None,
+        ctx: C | None = None,
         settings: "DolphinSettings | None" = None,
-    ) -> "BacktestResult":
-        from scheme.execute.strategy.api import run_backtest
-        from scheme.execute.strategy.assembly import Strategy, context_type
+    ) -> "BacktestResult[Self]":
+        from scheme.execute.strategy.components import run_research
 
-        from .algo import ModelAlgo
-
-        if not isinstance(model, type) or not issubclass(model, ModelAlgo):
-            raise TypeError("run 需要 ModelAlgo 类")
-        context = ctx if ctx is not None else context_type(model)()
-        strategy = Strategy(context, params=self, model=model, **self.default_algos())
-        return run_backtest(strategy.algos, strategy.ctx, self, settings=settings)
+        return run_research(self, "model", algo, ctx=ctx, settings=settings)

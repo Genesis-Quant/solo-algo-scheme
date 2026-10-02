@@ -3,7 +3,7 @@
 from .internal.algo import Algo
 from .internal.context import ResearchContext
 from .internal.form import ReportForm
-from .internal.params import BacktestParameters, StrategyParams
+from .internal.params import StrategyAnalysisParams, StrategyParams
 from .internal.types import Asset, Order, Signal, Target
 from .projects.control import ControlAlgo, ControlAnalysisParams, ControlParams, ControlReportForm
 from .projects.execution import (
@@ -49,6 +49,6 @@ __all__ = [
     "ReportForm",
     "Signal",
     "StrategyParams",
-    "BacktestParameters",
+    "StrategyAnalysisParams",
     "Target",
 ]

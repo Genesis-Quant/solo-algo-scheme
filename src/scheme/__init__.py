@@ -35,6 +35,7 @@ from .base import (
     Order,
     ResearchContext,
     Signal,
+    StrategyAnalysisParams,
     StrategyParams,
     Target,
 )
@@ -75,6 +76,7 @@ __all__ = [
     "StopLimitOrder",
     "StopMarketOrder",
     "Strategy",
+    "StrategyAnalysisParams",
     "StrategyParams",
     "TWAPOrder",
     "Target",

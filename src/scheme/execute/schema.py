@@ -3,7 +3,7 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from scheme.base import BacktestParameters, FactorAnalysisParams
+from scheme.base import FactorAnalysisParams, StrategyAnalysisParams
 from scheme.execute.strategy.assembly import AlgoComponents
 
 
@@ -42,7 +42,7 @@ class FactorTask(Task):
 class AlgoTask(Task):
     algos: AlgoComponents[Package]
     context: str | None = Field(default=None, pattern=r"^[A-Za-z_][\w.]*:[A-Za-z_]\w*$")
-    backtest: BacktestParameters
+    backtest: StrategyAnalysisParams
 
     @model_validator(mode="after")
     def require_research_component(self) -> Self:

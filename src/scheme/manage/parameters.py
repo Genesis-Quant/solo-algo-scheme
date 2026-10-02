@@ -11,15 +11,16 @@ from pydantic import BaseModel, TypeAdapter
 
 from scheme.base import (
     ControlAlgo,
-    ControlReportForm,
+    ControlAnalysisParams,
     ExecutionAlgo,
-    ExecutionReportForm,
+    ExecutionAnalysisParams,
     Factor,
-    FactorReportForm,
+    FactorAnalysisParams,
     ModelAlgo,
-    ModelReportForm,
+    ModelAnalysisParams,
     OptimizeAlgo,
-    OptimizeReportForm,
+    OptimizeAnalysisParams,
+    ReportForm,
 )
 
 
@@ -33,6 +34,18 @@ def defaults(model: type[BaseModel]) -> dict[str, Any]:
     }
 
 
+def _analysis_type(form: type[ReportForm], expected: type[BaseModel]) -> type[BaseModel]:
+    """Pydantic 将具体 ReportForm 泛型保存在参数化父类，而非项目子类上。"""
+    for base in form.__mro__:
+        generic = base.__dict__.get("__pydantic_generic_metadata__", {})
+        if generic.get("origin") is ReportForm:
+            model = generic["args"][0]
+            if isinstance(model, type) and issubclass(model, expected):
+                return model
+            break
+    raise ValueError(f"{form.__name__} 必须声明 ReportForm[{expected.__name__}] 或其分析子类")
+
+
 def inspect_project(directory: Path, values: dict | None = None) -> dict:
     metadata = tomllib.loads((directory / "pyproject.toml").read_text())
     module_name = metadata.get("tool", {}).get("uv", {}).get("build-backend", {}).get(
@@ -43,28 +56,31 @@ def inspect_project(directory: Path, values: dict | None = None) -> dict:
     if not Path(module.__file__).resolve().is_relative_to(directory.resolve()):
         raise ValueError("导入的入口不属于当前源码")
     definitions = (
-        (Factor, FactorReportForm),
-        (ModelAlgo, ModelReportForm),
-        (OptimizeAlgo, OptimizeReportForm),
-        (ControlAlgo, ControlReportForm),
-        (ExecutionAlgo, ExecutionReportForm),
+        (Factor, "FactorReportForm", FactorAnalysisParams),
+        (ModelAlgo, "ModelReportForm", ModelAnalysisParams),
+        (OptimizeAlgo, "OptimizeReportForm", OptimizeAnalysisParams),
+        (ControlAlgo, "ControlReportForm", ControlAnalysisParams),
+        (ExecutionAlgo, "ExecutionReportForm", ExecutionAnalysisParams),
     )
     candidates = [
-        (algo, form)
-        for algo, form in definitions
-        if hasattr(module, algo.__name__) and hasattr(module, form.__name__)
+        (algo, form, analysis)
+        for algo, form, analysis in definitions
+        if hasattr(module, algo.__name__) and hasattr(module, form)
     ]
     if len(candidates) != 1:
         raise ValueError("项目必须导出一组对应类型的算法类和 ReportForm")
-    algo_base, form_base = candidates[0]
+    algo_base, form_name, expected_analysis = candidates[0]
     algo_type = getattr(module, algo_base.__name__)
-    form_type = getattr(module, form_base.__name__)
+    form_type = getattr(module, form_name)
     if not isinstance(algo_type, type) or not issubclass(algo_type, algo_base):
         raise ValueError(f"{algo_base.__name__} 必须继承 Scheme 对应基类")
-    if not isinstance(form_type, type) or not issubclass(form_type, form_base):
-        raise ValueError(f"{form_base.__name__} 必须继承 Scheme 对应表单")
+    if not isinstance(form_type, type) or not issubclass(form_type, ReportForm):
+        raise ValueError(f"{form_name} 必须继承 ReportForm")
+    analysis_type = _analysis_type(form_type, expected_analysis)
     if values is not None:
         analysis = form_type.model_validate(values["form"]).build()
+        if not isinstance(analysis, analysis_type):
+            raise ValueError(f"{form_name}.build() 必须返回 {analysis_type.__name__}")
         if algo_base is not Factor:
             from scheme.execute.strategy.components import BASES, research_components
 
@@ -88,10 +104,20 @@ def inspect_project(directory: Path, values: dict | None = None) -> dict:
                 "upstream": upstream,
                 "backtest": analysis.model_dump(mode="json"),
             }
+        from scheme.execute.strategy.assembly import parameter_type, project_parameters
+
+        factor_model = parameter_type(algo_type)
+        unsupported = (
+            set(type(analysis).model_fields) | set(analysis.model_extra or {})
+        ) - factor_model.model_fields.keys() - FactorAnalysisParams.model_fields.keys()
+        if unsupported:
+            raise ValueError(
+                f"因子分析自定义字段无法由标准分析器或 Factor 参数保存：{sorted(unsupported)}"
+            )
         return {
             "entry": f"{module_name}:Factor",
-            "factor": analysis.factor_params.model_dump(mode="json"),
-            "analysis": analysis.model_dump(mode="json"),
+            "factor": project_parameters(factor_model, analysis).model_dump(mode="json"),
+            "analysis": project_parameters(FactorAnalysisParams, analysis).model_dump(mode="json"),
         }
 
     schema = form_type.model_json_schema()

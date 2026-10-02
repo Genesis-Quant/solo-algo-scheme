@@ -27,7 +27,7 @@ from scheme import (
 from scheme.base import ModelAlgo, ModelParams, ModelReportForm
 from scheme.config import DolphinSettings
 from scheme.execute.factor import FactorAnalysisParams, analyze_factors
-from scheme.execute.strategy import BacktestParameters, ResearchBacktest, run_backtest
+from scheme.execute.strategy import ResearchBacktest, StrategyAnalysisParams, run_backtest
 
 pytestmark = pytest.mark.skipif(
     os.getenv("SOLO_TEST_DOLPHIN") != "1", reason="需要显式开启真实 DolphinDB 测试"
@@ -84,7 +84,7 @@ def test_real_direct_order_and_parquet(tmp_path):
     result = run_backtest(
         [Buy(Params())],
         ctx,
-        BacktestParameters(
+        StrategyAnalysisParams(
             start="2025-01-02",
             end="2025-01-03",
             symbols=["000001.XSHE"],
@@ -163,7 +163,7 @@ def test_real_tick_adapter_and_account():
     result = run_backtest(
         [Buy(Params())],
         ctx,
-        BacktestParameters(
+        StrategyAnalysisParams(
             start="2025-01-02",
             end="2025-01-03",
             symbols=["000001.XSHE"],
