@@ -363,3 +363,97 @@ def test_upstream_schema_metadata_and_package_wire_shape(project, monkeypatch):
     assert payload["upstream"] == {"model": {
         "package": "model-example", "version": "1.0.0", "entry": "model_example:ModelAlgo",
     }}
+
+
+@pytest.mark.parametrize("outer_alias", [False, True])
+@pytest.mark.parametrize("nested_alias", [False, True])
+def test_nested_form_alias_scopes_round_trip_schema_defaults_and_submission(
+    project, outer_alias, nested_alias,
+):
+    directory, module = project
+
+    class Nested(BaseModel):
+        model_config = ConfigDict(validate_by_alias=nested_alias, extra="forbid")
+        count: int = Field(
+            validation_alias=AliasChoices("n_select", "legacy_count"),
+            serialization_alias="reported_count", gt=0,
+        )
+
+    nested_key = "n_select" if nested_alias else "count"
+
+    class Form(ReportForm[CustomAnalysis]):
+        model_config = ConfigDict(validate_by_alias=outer_alias)
+        nested: Nested = Field(alias="selection")
+        optional: Nested | None = Field(
+            default=Nested(**{nested_key: 7}), alias="optional_selection",
+        )
+        items: list[Nested] = Field(
+            default_factory=lambda: [Nested(**{nested_key: 11})], alias="selections",
+        )
+        empty: Nested | None = Field(default=None, alias="empty_selection")
+
+        def build(self) -> CustomAnalysis:
+            return CustomAnalysis(
+                start="2026-06-01", end="2026-06-03", columns=["f"],
+                window=self.nested.count + self.optional.count + sum(item.count for item in self.items),
+            )
+
+    module.Factor, module.FactorReportForm = CustomFactor, Form
+    definition = inspect_project(directory)
+    assert definition["protocol"] == 2
+    schema = definition["schemas"]["form"]
+    nested_schema = schema["$defs"]["Nested"]
+    assert set(nested_schema["properties"]) == {nested_key}
+    assert nested_schema["required"] == [nested_key]
+    keys = {
+        "nested": "selection", "optional": "optional_selection",
+        "items": "selections", "empty": "empty_selection",
+    } if outer_alias else {name: name for name in Form.model_fields}
+    assert set(schema["properties"]) == set(keys.values())
+    assert schema["required"] == [keys["nested"]]
+    assert schema["properties"][keys["optional"]]["default"] == {nested_key: 7}
+    assert schema["properties"][keys["nested"]]["$ref"] == "#/$defs/Nested"
+    assert schema["properties"][keys["items"]]["items"]["$ref"] == "#/$defs/Nested"
+    assert definition["values"] == {"form": {
+        keys["optional"]: {nested_key: 7}, keys["items"]: [{nested_key: 11}],
+        keys["empty"]: None,
+    }}
+    values = {**definition["values"]["form"], keys["nested"]: {nested_key: 17}}
+    assert inspect_project(directory, {"form": values})["factor"]["window"] == 35
+    with pytest.raises(ValidationError, match=nested_key):
+        inspect_project(directory, {"form": {**values, keys["nested"]: {}}})
+    with pytest.raises(ValidationError):
+        inspect_project(directory, {"form": {
+            **values, keys["nested"]: {"count" if nested_alias else "n_select": 17},
+        }})
+    with pytest.raises(ValidationError, match="undeclared"):
+        inspect_project(directory, {"form": {
+            **values, keys["nested"]: {nested_key: 17, "undeclared": 99},
+        }})
+
+
+def test_nested_mixed_config_recurses_without_changing_ordinary_form_schema():
+    class Aliased(BaseModel):
+        count: int = Field(alias="n_select")
+
+    class Canonical(BaseModel):
+        model_config = ConfigDict(validate_by_alias=False, extra="forbid")
+        nested: Aliased = Field(alias="hidden_nested")
+        count: int = Field(alias="hidden_count")
+
+    class Form(BaseModel):
+        settings: Canonical = Canonical(nested=Aliased(n_select=7), count=11)
+
+    from scheme.manage.parameters import _form_schema
+
+    schema, wire = _form_schema(Form)
+    assert wire == {"settings": "settings"}
+    assert set(schema["$defs"]["Canonical"]["properties"]) == {"nested", "count"}
+    assert set(schema["$defs"]["Aliased"]["properties"]) == {"n_select"}
+    values = {"settings": {"nested": {"n_select": 7}, "count": 11}}
+    assert defaults(Form) == values
+    assert schema["properties"]["settings"]["default"] == values["settings"]
+    assert Form.model_validate(values).settings.count == 11
+
+    for ordinary in (CustomForm,):
+        assert _form_schema(ordinary)[0] == ordinary.model_json_schema(mode="validation")

@@ -5,9 +5,12 @@ import sys
 import tomllib
 from importlib import metadata as packages
 from pathlib import Path
-from typing import Any
+from types import UnionType
+from typing import Any, Union, get_args, get_origin
 
 from pydantic import AliasChoices, AliasPath, BaseModel, TypeAdapter
+from pydantic.json_schema import GenerateJsonSchema
+from pydantic_core import core_schema
 
 from scheme.base import (
     ControlAlgo,
@@ -24,21 +27,69 @@ from scheme.base import (
 )
 
 
+def _form_key(model: type[BaseModel], name: str) -> str:
+    alias = model.model_fields[name].validation_alias if model.model_config.get("validate_by_alias") is not False else None
+    if isinstance(alias, AliasChoices):
+        alias = next((choice for choice in alias.choices if isinstance(choice, str)), None)
+        if alias is None:
+            raise ValueError(f"Form 字段 {name!r} 的 AliasPath 不支持扁平表单 JSON（unsupported）")
+    if isinstance(alias, AliasPath):
+        raise ValueError(f"Form 字段 {name!r} 的 AliasPath 不支持扁平表单 JSON（unsupported）")
+    return alias if isinstance(alias, str) else name
+
+
+def _form_value(value: Any, annotation: Any = Any) -> Any:
+    """Encode defaults with each nested model's validation keys, not serialization aliases."""
+    if isinstance(value, BaseModel):
+        annotation, value = type(value), dict(value)
+    origin, args = get_origin(annotation), get_args(annotation)
+    if origin in (Union, UnionType) and value is not None:
+        models = [arg for arg in args if isinstance(arg, type) and issubclass(arg, BaseModel)]
+        if len(models) == 1 and isinstance(value, dict):
+            annotation = models[0]
+    if isinstance(value, dict):
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            fields = annotation.model_fields
+            wire = {name: _form_key(annotation, name) for name in fields}
+            canonical = {key: name for name, key in wire.items()}
+            result = {}
+            for key, item in value.items():
+                name = key if key in fields else canonical.get(key)
+                if name is None:
+                    result[key] = _form_value(item)  # Unknown inputs must still reach validation.
+                else:
+                    result[wire[name]] = _form_value(item, fields[name].annotation)
+            return result
+        item_type = args[1] if origin is dict and len(args) == 2 else Any
+        return {key: _form_value(item, item_type) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        item_type = args[0] if args else Any
+        return [_form_value(item, item_type) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value  # JSON scalars are already encoded; do not coerce or drop invalid inputs.
+    return TypeAdapter(annotation).dump_python(value, mode="json", by_alias=False)
+
+
+class _FormSchema(GenerateJsonSchema):
+    def model_schema(self, schema: core_schema.ModelSchema) -> dict:
+        previous = self.by_alias
+        self.by_alias = schema["cls"].model_config.get("validate_by_alias") is not False
+        try:
+            return super().model_schema(schema)
+        finally:
+            self.by_alias = previous
+
+    def encode_default(self, value: Any) -> Any:
+        return super().encode_default(_form_value(value))
+
+
 def _form_schema(model: type[BaseModel]) -> tuple[dict, dict[str, str]]:
-    """Map canonical fields to the flat validation schema without rewriting it."""
-    by_alias = model.model_config.get("validate_by_alias") is not False
-    schema = model.model_json_schema(by_alias=by_alias, mode="validation")
+    """Keep Pydantic's refs/required handling, scoped to each model's alias policy."""
+    schema = model.model_json_schema(mode="validation", schema_generator=_FormSchema)
     properties = schema.get("properties", {})
     wire = {}
-    for name, field in model.model_fields.items():
-        alias = field.validation_alias if by_alias else None
-        if isinstance(alias, AliasChoices):
-            alias = next((choice for choice in alias.choices if isinstance(choice, str)), None)
-            if alias is None:
-                raise ValueError(f"Form 字段 {name!r} 的 AliasPath 不支持扁平表单 JSON（unsupported）")
-        if isinstance(alias, AliasPath):
-            raise ValueError(f"Form 字段 {name!r} 的 AliasPath 不支持扁平表单 JSON（unsupported）")
-        key = alias if isinstance(alias, str) else name
+    for name in model.model_fields:
+        key = _form_key(model, name)
         if key not in properties or key in wire.values():
             raise ValueError(f"Form 字段 {name!r} 无法唯一对应 schema wire key {key!r}（unsupported）")
         wire[name] = key
@@ -48,9 +99,7 @@ def _form_schema(model: type[BaseModel]) -> tuple[dict, dict[str, str]]:
 def defaults(model: type[BaseModel]) -> dict[str, Any]:
     _, wire = _form_schema(model)
     return {
-        wire[name]: TypeAdapter(spec.annotation).dump_python(
-            spec.get_default(call_default_factory=True), mode="json"
-        )
+        wire[name]: _form_value(spec.get_default(call_default_factory=True), spec.annotation)
         for name, spec in model.model_fields.items()
         if not spec.is_required()
     }
