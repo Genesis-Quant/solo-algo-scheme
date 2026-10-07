@@ -75,17 +75,19 @@ Model 保存版本与因子共用源码快照和候选 wheel 流程；输入 kin
 algos.model 指向冻结的候选包，backtest 保存表单构建后的参数和后续 Algo 选择。
 Worker 使用锁文件中的 Scheme 默认实现；显式指定的下游包优先于默认实现。
 
-Algo 包主版本与 Scheme 一致，小版本可独立迭代。包声明经过验证的最低 Scheme 正式版本及下一大版本上界，例如 `scheme>=1.1.0,<2.0.0`；不接受精确版本、直接 Git/URL、条件依赖或跨大版本范围。模板选择与正式 wheel 校验都会检查实际 Scheme 版本满足该范围，项目 pin 不会降低模板的最低版本要求。项目和正式任务使用 uv source 与锁文件固定实际版本。其他共享依赖也须维持可共同解析的范围。
+Algo 包与 Scheme 的主版本、次版本必须一致，补丁版本可独立迭代。包声明整个主次版本系列，例如 `scheme>=1.2.0,<1.3.0`，因此 Scheme 1.2.0 与 1.2.7 均可用于 1.2.x 项目，不允许与 1.1.x 或 1.3.x 混用。下界必须为该系列的补丁 0，上界必须为下一次版本的补丁 0；不接受补丁版本下界、精确版本、直接 Git/URL、条件依赖或跨次版本范围。模板选择、上游项目安装、策略组装和正式 wheel 校验使用同一兼容边界。项目和正式任务仍使用 uv source 与锁文件精确固定实际版本，兼容不等于自动升级或放宽锁文件、wheel 身份校验。其他共享依赖仍须可共同解析。
 
-### 1.1.0 参数接口迁移
+### 1.2.0 发布契约与旧版本退役
 
-1.1.0 包含明确的 Python 参数接口调整，不是对 1.0.x 源码的无条件兼容升级。旧的 `BacktestParameters` 使用 `StrategyAnalysisParams` 替代，日期/Settings/Components 字段混入类已移除；项目按上面的 Param、AnalysisParams、ReportForm 结构迁移。新模板最低要求 Scheme 1.1.0，不能与 1.0.x 的表单发现入口混用。已有研究项目与历史任务继续使用原锁定的 Scheme commit，不自动升级、重写源码或锁文件；需要升级的项目必须先迁移源码并验证。
+1.2.0 是完整主次版本兼容契约的首个活跃发布。历史 Scheme 0.1.0、1.0.0、1.0.1、1.1.0 已退役：旧依赖声明不覆盖新的窄系列契约，历史 1.0 补丁也存在 CLI/报告接口变化；1.1.0 的正式执行仍按旧范围要求检查，不能仅修改调用方版本声明解决。Solo Backend 的 `version-policy.json` 统一决定新使用准入，不删除或移动旧 Tag。
 
-1.1.0 保留任务 JSON 字段、报告文件结构和 Runtime 协议。参数投影保留 Pydantic 验证别名、运行时嵌套类型和非序列化字段；完整策略执行按已构造 Algo 的实际参数校验分析参数，包含默认值、类型转换及与分析配置同名的算法字段。报告保存具体 AnalysisParams 的深拷贝。
+1.2.0 保留在 1.1.0 引入的 Param → AnalysisParams 职责和单一 ReportForm 泛型。旧的 `BacktestParameters` 使用 `StrategyAnalysisParams` 替代，日期/Settings/Components 字段混入类已移除；新模板最低要求 Scheme 1.2.0。已有研究项目保留原锁定 commit、源码和锁文件，历史报告仍可查看，退役来源不能新保存、安装为上游或组装策略。升级须迁移源码并验证，不能通过自动修改旧环境替代。
 
-组装时统一使用一个 Scheme 安装实例，按各 Algo 的参数模型校验统一参数，并校验 Context 类型。Context 赋值校验 Signal/Target/Order 类型；Model 的 Signal 业务结构仍须与 Optimize 一致，不能仅凭包版本推断信号含义。每次发布应验证跨小版本 Algo 的混合安装、组装及原有报告契约。
+1.2.0 保留任务 JSON 字段、报告文件结构和 Runtime 协议。参数投影保留 Pydantic 验证别名、运行时嵌套类型和非序列化字段；完整策略执行按已构造 Algo 的实际参数校验分析参数，包含默认值、类型转换及与分析配置同名的算法字段。报告保存具体 AnalysisParams 的深拷贝。表单 schema、默认值、已保存值与提交均使用同一公开 validation alias；业务参数分类仍使用规范字段名，无法表示为平面 UI 字段的 AliasPath 明确拒绝。
 
-运行完成后的 `run.json.versions.scheme` 是报告解析版本的依据，不能用项目创建时的 Scheme 版本代替。Runtime 的 `protocol` 仅表示进程完成协议，与 Scheme 的业务大版本分别演进。
+组装时统一使用一个 Scheme 安装实例，按各 Algo 的参数模型校验统一参数，并校验 Context 类型。Context 赋值校验 Signal/Target/Order 类型；Model 的 Signal 业务结构仍须与 Optimize 一致，不能仅凭包版本推断信号含义。补丁升级必须保持该主次版本系列内的 Python 接口兼容；每次发布应验证不同补丁版本 Algo 的双向混合安装、组装及原有报告契约。需要不兼容的 Python 接口调整时升级次版本；报告结构的兼容边界独立由主版本控制。
+
+运行完成后的 `run.json.versions.scheme` 是报告解析版本的依据，不能用项目创建时的 Scheme 版本代替。前端报告仍仅按该版本的主版本分派，1.0.x、1.1.x 等 1.x 报告共用 v1 适配器，不受项目互调的主次版本限制影响。Runtime 的 `protocol` 仅表示进程完成协议，与 Scheme 的业务主版本分别演进。
 
 ```shell
 uv sync
@@ -261,7 +263,7 @@ target 为 dict[Asset, float]，表示完整目标资产权重，以账户权益
 若轮到提交时已经收盘或午休，订单保留到下一个可交易回调；真正报单时将 time 设置为当前回测时间。
 这是待提交订单的发送时间，不是提前指定未来执行时间，且不会改写原订单对象。
 
-研究包版本必须与任务安装的 scheme 同主版本并声明兼容范围；wheel 哈希、实际安装内容、
+研究包版本必须与任务安装的 scheme 同主版本、次版本并声明整个补丁系列的兼容范围；wheel 哈希、实际安装内容、
 参数 BaseModel、入口所属包均检查。报告写共享目录，run.json 最后写入，含展开后的参数、实际版本与报告文件名。
 不同正式运行应使用不同输出目录。Python 直接调用用于当前 Kernel 调试；正式包身份及锁文件检查由 CLI 执行。
 
@@ -274,7 +276,7 @@ target 为 dict[Asset, float]，表示完整目标资产权重，以账户权益
 
 `OptimizeReportForm`、`ControlReportForm`、`ExecutionReportForm` 各自生成对应的 AnalysisParams，
 `params.run(当前项目 Algo)` 只替换当前环节。上游字段选择插件已安装的项目入口；后续环节使用表单中的默认算法。
-`scheme.algo_options("model")` 等函数返回同 Scheme 大版本的已安装包选项，插件也使用这些选项生成下拉框。
+`scheme.algo_options("model")` 等函数返回同 Scheme 主版本、次版本的已安装包选项，补丁版本可不同；插件也使用这些选项生成下拉框。
 Control 选择 Model、Optimize；Execution 选择 Model、Optimize、Control；不会把默认算法当作已选的上游项目。
 
 ```python

@@ -1,11 +1,13 @@
 """项目表单发现与冻结参数序列化；不运行算法或研究任务。"""
 
+import json
 import sys
 from datetime import date
+from io import StringIO
 from types import ModuleType, SimpleNamespace
 
 import pytest
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field, ValidationError
 
 from scheme.base import (
     ControlAlgo,
@@ -21,7 +23,7 @@ from scheme.base import (
     OptimizeAnalysisParams,
     ReportForm,
 )
-from scheme.manage.parameters import inspect_project
+from scheme.manage.parameters import defaults, inspect_project
 
 
 @pytest.fixture
@@ -78,6 +80,147 @@ def test_direct_generic_form_preserves_custom_factor_runtime_fields(project):
     assert "window" not in payload["analysis"]
     for name in ("start", "end", "universe"):
         assert payload["factor"][name] == payload["analysis"][name]
+
+
+@pytest.mark.parametrize("alias", [
+    "lookback_days",
+    AliasChoices("lookback_days", "legacy_days"),
+    AliasChoices(AliasPath("config", "window"), "lookback_days", "legacy_days"),
+])
+def test_sole_generic_form_alias_defaults_round_trip_to_runtime(project, alias):
+    directory, module = project
+
+    class AliasedForm(ReportForm[CustomAnalysis]):
+        model_config = ConfigDict(extra="allow", frozen=True, populate_by_name=True)
+        start: date = date(2026, 6, 1)
+        end: date = date(2026, 6, 3)
+        window: int = Field(
+            default=20, validation_alias=alias, serialization_alias="serialized_days", gt=0,
+        )
+
+        def build(self) -> CustomAnalysis:
+            return CustomAnalysis(
+                start=self.start, end=self.end, window=self.window, columns=["f"],
+            )
+
+    module.Factor, module.FactorReportForm = CustomFactor, AliasedForm
+    definition = inspect_project(directory)
+    assert definition["protocol"] == 2
+    assert set(definition["schemas"]) == {"form"}
+    schema = definition["schemas"]["form"]
+    assert set(schema["properties"]) == {"start", "end", "lookback_days"}
+    assert schema["properties"]["lookback_days"]["default"] == 20
+    assert schema.get("required", []) == []
+    assert definition["values"] == {"form": {
+        "start": "2026-06-01", "end": "2026-06-03", "lookback_days": 20,
+    }}
+    payload = inspect_project(directory, {
+        "form": {**definition["values"]["form"], "lookback_days": 17},
+    })
+    assert payload["factor"]["window"] == 17
+    assert "window" not in payload["analysis"]
+    for unknown in ("window", "serialized_days", "legacy_days", "config", "unknown", "model"):
+        with pytest.raises(ValueError, match=f"未声明字段.*{unknown}"):
+            inspect_project(directory, {"form": {"lookback_days": 17, unknown: 99}})
+    with pytest.raises(ValidationError, match="lookback_days"):
+        inspect_project(directory, {"form": {"lookback_days": 0}})
+
+
+def test_required_form_alias_is_published_and_validated(project):
+    directory, module = project
+
+    class AliasedForm(ReportForm[CustomAnalysis]):
+        window: int = Field(alias="lookback_days")
+
+        def build(self) -> CustomAnalysis:
+            return CustomAnalysis(
+                start="2026-06-01", end="2026-06-03", window=self.window, columns=["f"],
+            )
+
+    module.Factor, module.FactorReportForm = CustomFactor, AliasedForm
+    definition = inspect_project(directory)
+    assert definition["schemas"]["form"]["required"] == ["lookback_days"]
+    assert definition["values"] == {"form": {}}
+    assert inspect_project(directory, {"form": {"lookback_days": 17}})["factor"]["window"] == 17
+    with pytest.raises(ValidationError, match="lookback_days"):
+        inspect_project(directory, {"form": {}})
+
+
+@pytest.mark.parametrize("alias", [
+    AliasPath("config", "window"),
+    AliasPath("lookback_days"),
+    AliasChoices(AliasPath("config", "window"), AliasPath("other", 0)),
+])
+@pytest.mark.parametrize("submit", [False, True])
+def test_form_alias_path_without_flat_schema_key_is_unsupported(project, alias, submit):
+    directory, module = project
+
+    class UnsupportedForm(ReportForm[CustomAnalysis]):
+        window: int = Field(default=20, validation_alias=alias)
+
+        def build(self) -> CustomAnalysis:
+            raise AssertionError("unsupported form must not build")
+
+    module.Factor, module.FactorReportForm = CustomFactor, UnsupportedForm
+    with pytest.raises(ValueError, match="window.*AliasPath.*unsupported"):
+        inspect_project(directory, {"form": {"window": 17}} if submit else None)
+
+
+def test_form_with_alias_validation_disabled_keeps_canonical_wire_key(project):
+    directory, module = project
+
+    class CanonicalForm(ReportForm[CustomAnalysis]):
+        model_config = ConfigDict(validate_by_alias=False)
+        window: int = Field(default=20, alias="lookback_days")
+
+        def build(self) -> CustomAnalysis:
+            return CustomAnalysis(
+                start="2026-06-01", end="2026-06-03", window=self.window, columns=["f"],
+            )
+
+    module.Factor, module.FactorReportForm = CustomFactor, CanonicalForm
+    definition = inspect_project(directory)
+    assert set(definition["schemas"]["form"]["properties"]) == {"window"}
+    assert definition["values"] == {"form": {"window": 20}}
+    assert inspect_project(directory, {"form": {"window": 17}})["factor"]["window"] == 17
+    with pytest.raises(ValueError, match="未声明字段.*lookback_days"):
+        inspect_project(directory, {"form": {"lookback_days": 17}})
+
+
+def test_defaults_preserve_default_factories_and_json_values():
+    class Form(BaseModel):
+        tags: list[str] = Field(default_factory=list, alias="labels")
+        start: date = date(2026, 6, 1)
+
+    first, second = defaults(Form), defaults(Form)
+    assert first == second == {"labels": [], "start": "2026-06-01"}
+    assert first["labels"] is not second["labels"]
+
+
+def test_manage_cli_keeps_single_generic_form_protocol(project, monkeypatch, capsys):
+    from scheme.manage import main
+
+    directory, module = project
+
+    class CliForm(ReportForm[CustomAnalysis]):
+        window: int = Field(default=20, alias="lookback_days")
+
+        def build(self) -> CustomAnalysis:
+            return CustomAnalysis(
+                start="2026-06-01", end="2026-06-03", window=self.window, columns=["f"],
+            )
+
+    module.Factor, module.FactorReportForm = CustomFactor, CliForm
+    assert main(["parameters", "--project", str(directory)]) == 0
+    definition = json.loads(capsys.readouterr().out)
+    assert definition["protocol"] == 2
+    assert set(definition["schemas"]) == {"form"}
+    assert definition["values"] == {"form": {"lookback_days": 20}}
+    monkeypatch.setattr(sys, "stdin", StringIO('{"form":{"lookback_days":17}}'))
+    assert main(["parameters", "--project", str(directory), "--validate"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["entry"] == f"{module.__name__}:Factor"
+    assert payload["factor"]["window"] == 17
 
 
 @pytest.mark.parametrize("updates", [{}, {"window": 0}])

@@ -33,7 +33,7 @@ __all__ = ["algo_options"]
 
 
 def algo_options(kind: str) -> dict[str, str]:
-    """返回已安装同 Scheme 大版本项目的 {类入口: 包名及版本} 选项。"""
+    """返回已安装同 Scheme major.minor 项目的 {类入口: 包名及版本} 选项。"""
     from scheme.execute.packages import validate_scheme_requirement
 
     if kind not in BASES:
@@ -44,12 +44,10 @@ def algo_options(kind: str) -> dict[str, str]:
         name = dist.metadata["Name"]
         module = name.replace("-", "_")
         # 平台生成的包名为 <类型>-<项目 ID>，模板按约定导出同名 Algo。
-        if (module != kind and not module.startswith(kind + "_")) or (
-            Version(dist.version).major != version.major
-        ):
+        if module != kind and not module.startswith(kind + "_"):
             continue
         try:
-            validate_scheme_requirement(dist.requires or [], version)
+            validate_scheme_requirement(dist.requires or [], version, Version(dist.version))
         except ValueError:
             continue
         entry = f"{module}:{BASES[kind].__name__}"

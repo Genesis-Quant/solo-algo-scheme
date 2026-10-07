@@ -249,27 +249,84 @@ def test_upstream_must_be_installed_and_correct_kind(monkeypatch):
 
 @pytest.mark.parametrize(
     "version,expected",
-    [("1.0.1", {"model_old:ModelAlgo"}), ("1.1.0", {"model_old:ModelAlgo", "model_new:ModelAlgo"})],
+    [
+        ("1.0.0", {"model_old:ModelAlgo"}),
+        ("1.0.7", {"model_old:ModelAlgo"}),
+        ("1.1.0", {"model_minimum:ModelAlgo", "model_patch:ModelAlgo", "model_shorthand:ModelAlgo"}),
+        ("1.1.7", {"model_minimum:ModelAlgo", "model_patch:ModelAlgo", "model_shorthand:ModelAlgo"}),
+        ("1.2.0", {"model_new:ModelAlgo"}),
+        ("2.3.0", {"model_other_major:ModelAlgo", "model_other_major_minimum:ModelAlgo"}),
+        ("2.3.7", {"model_other_major:ModelAlgo", "model_other_major_minimum:ModelAlgo"}),
+    ],
 )
 def test_algo_options_match_formal_scheme_compatibility(monkeypatch, version, expected):
     from scheme.execute.strategy import components
 
-    requirements = {
-        "old": ["scheme>=1.0.0,<2.0.0"],
-        "new": ["scheme>=1.1.0,<2.0.0"],
-        "exact": ["scheme==1.1.0"],
-        "unbounded": ["scheme>=1.0.0"],
-        "conditional": ['scheme>=1.0.0,<2.0.0; python_version >= "3.12"'],
-        "extra": ["scheme[optional]>=1.0.0,<2.0.0"],
-        "duplicate": ["scheme>=1.0.0,<2.0.0", "scheme>=1.1.0,<2.0.0"],
+    candidates = {
+        "old": ("1.0.9", ["scheme>=1.0,<1.1"]),
+        "minimum": ("1.1.0", ["scheme>=1.1.0,<1.2.0"]),
+        "patch": ("1.1.7", ["scheme>=1.1.0,<1.2.0"]),
+        "shorthand": ("1.1", ["pydantic>=2,<3", "ScHeMe (<1.2, >=1.1)"]),
+        "new": ("1.2.0", ["scheme>=1.2.0,<1.3.0"]),
+        "other_major": ("2.3.7", ["scheme>=2.3.0,<2.4.0"]),
+        "other_major_minimum": ("2.3.0", ["scheme>=2.3.0,<2.4.0"]),
+        "package_older_minor": ("1.0.7", ["scheme>=1.1.0,<1.2.0"]),
+        "package_newer_minor": ("1.2.7", ["scheme>=1.1.0,<1.2.0"]),
+        "package_other_major": ("2.1.7", ["scheme>=1.1.0,<1.2.0"]),
+        "old_range_old_package": ("1.0.7", ["scheme>=1.0.0,<2.0.0"]),
+        "old_range_new_package": ("1.1.7", ["scheme>=1.1.0,<2.0.0"]),
+        "patch_floor": ("1.1.7", ["scheme>=1.1.1,<1.2.0"]),
+        "project_patch_floor": ("1.1.7", ["scheme>=1.1.7,<1.2.0"]),
+        "patch_upper": ("1.1.7", ["scheme>=1.1.0,<1.1.8"]),
+        "cross_minor_lower": ("1.1.0", ["scheme>=1.0.0,<1.2.0"]),
+        "cross_minor_upper": ("1.1.0", ["scheme>=1.1.0,<1.3.0"]),
+        "exact": ("1.1.0", ["scheme==1.1.0"]),
+        "unbounded": ("1.1.0", ["scheme>=1.1.0"]),
+        "excluded": ("1.1.0", ["scheme>=1.1.0,<1.2.0,!=1.1.2"]),
+        "url": ("1.1.0", ["scheme @ https://example.invalid/scheme.whl"]),
+        "conditional": ("1.1.0", ['scheme>=1.1.0,<1.2.0; python_version >= "3.12"']),
+        "extra": ("1.1.0", ["scheme[optional]>=1.1.0,<1.2.0"]),
+        "duplicate": ("1.1.0", ["scheme>=1.1.0,<1.2.0", "scheme>=1.1,<1.2"]),
+        "duplicate_bound": ("1.1.0", ["scheme>=1.1.0,>=1.1.0,<1.2.0"]),
+        "malformed_requirement": ("1.1.0", ["scheme>=not-a-version,<1.2.0"]),
     }
+    for index, invalid_version in enumerate([
+        "not-a-version", "1!1.1.0", "1.1.0rc1", "1.1.0.dev1",
+        "1.1.0.post1", "1.1.0+local", "1.1.0.0", "1.1.0.1",
+    ]):
+        candidates[f"invalid_version_{index}"] = (invalid_version, ["scheme>=1.1.0,<1.2.0"])
     distributions = [
-        SimpleNamespace(metadata={"Name": f"model-{name}"}, version="1.1.0", requires=values)
-        for name, values in requirements.items()
+        SimpleNamespace(metadata={"Name": f"model-{name}"}, version=package_version, requires=values)
+        for name, (package_version, values) in candidates.items()
     ]
     monkeypatch.setattr(components.metadata, "version", lambda _: version)
     monkeypatch.setattr(components.metadata, "distributions", lambda: distributions)
-    assert set(components.algo_options("model")) == expected
+    options = components.algo_options("model")
+    assert set(options) == expected
+    assert list(options) == sorted(options)
+    for name in ("minimum", "patch"):
+        entry = f"model_{name}:ModelAlgo"
+        if entry in options:
+            assert options[entry] == f"model-{name} · {candidates[name][0]}"
+
+
+@pytest.mark.parametrize("version", [
+    "not-a-version", "1!1.1.0", "1.1.0rc1", "1.1.0.dev1",
+    "1.1.0.post1", "1.1.0+local", "1.1.0.0", "1.1.0.1",
+])
+def test_algo_options_reject_non_release_scheme_versions(monkeypatch, version):
+    from scheme.execute.strategy import components
+
+    dist = SimpleNamespace(
+        metadata={"Name": "model-test"}, version="1.1.0", requires=["scheme>=1.1.0,<1.2.0"],
+    )
+    monkeypatch.setattr(components.metadata, "version", lambda _: version)
+    monkeypatch.setattr(components.metadata, "distributions", lambda: [dist])
+    if version == "not-a-version":
+        with pytest.raises(ValueError):
+            components.algo_options("model")
+    else:
+        assert components.algo_options("model") == {}
 
 
 def test_research_combines_only_declared_independent_algo_parameters(monkeypatch, backtest_spy):

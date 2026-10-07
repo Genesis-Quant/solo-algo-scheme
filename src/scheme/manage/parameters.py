@@ -7,7 +7,7 @@ from importlib import metadata as packages
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, TypeAdapter
+from pydantic import AliasChoices, AliasPath, BaseModel, TypeAdapter
 
 from scheme.base import (
     ControlAlgo,
@@ -24,9 +24,31 @@ from scheme.base import (
 )
 
 
+def _form_schema(model: type[BaseModel]) -> tuple[dict, dict[str, str]]:
+    """Map canonical fields to the flat validation schema without rewriting it."""
+    by_alias = model.model_config.get("validate_by_alias") is not False
+    schema = model.model_json_schema(by_alias=by_alias, mode="validation")
+    properties = schema.get("properties", {})
+    wire = {}
+    for name, field in model.model_fields.items():
+        alias = field.validation_alias if by_alias else None
+        if isinstance(alias, AliasChoices):
+            alias = next((choice for choice in alias.choices if isinstance(choice, str)), None)
+            if alias is None:
+                raise ValueError(f"Form 字段 {name!r} 的 AliasPath 不支持扁平表单 JSON（unsupported）")
+        if isinstance(alias, AliasPath):
+            raise ValueError(f"Form 字段 {name!r} 的 AliasPath 不支持扁平表单 JSON（unsupported）")
+        key = alias if isinstance(alias, str) else name
+        if key not in properties or key in wire.values():
+            raise ValueError(f"Form 字段 {name!r} 无法唯一对应 schema wire key {key!r}（unsupported）")
+        wire[name] = key
+    return schema, wire
+
+
 def defaults(model: type[BaseModel]) -> dict[str, Any]:
+    _, wire = _form_schema(model)
     return {
-        name: TypeAdapter(spec.annotation).dump_python(
+        wire[name]: TypeAdapter(spec.annotation).dump_python(
             spec.get_default(call_default_factory=True), mode="json"
         )
         for name, spec in model.model_fields.items()
@@ -77,7 +99,11 @@ def inspect_project(directory: Path, values: dict | None = None) -> dict:
     if not isinstance(form_type, type) or not issubclass(form_type, ReportForm):
         raise ValueError(f"{form_name} 必须继承 ReportForm")
     analysis_type = _analysis_type(form_type, expected_analysis)
+    schema, wire = _form_schema(form_type)
     if values is not None:
+        unknown = set(values["form"]) - set(wire.values())
+        if unknown:
+            raise ValueError(f"{form_name} 包含未声明字段：{sorted(unknown)}")
         analysis = form_type.model_validate(values["form"]).build()
         if not isinstance(analysis, analysis_type):
             raise ValueError(f"{form_name}.build() 必须返回 {analysis_type.__name__}")
@@ -120,7 +146,6 @@ def inspect_project(directory: Path, values: dict | None = None) -> dict:
             "analysis": project_parameters(FactorAnalysisParams, analysis).model_dump(mode="json"),
         }
 
-    schema = form_type.model_json_schema()
     from scheme.execute.strategy.components import algo_options
 
     for field in schema.get("properties", {}).values():

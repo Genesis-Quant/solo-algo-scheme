@@ -63,25 +63,36 @@ def validate_environment(environment: Environment) -> dict[str, str]:
     return actual
 
 
-def validate_scheme_requirement(requirements: list[str], version: Version) -> None:
-    """仅接受同主版本的最低正式版本范围，并验证实际 Scheme 在范围内。"""
+def validate_scheme_requirement(
+    requirements: list[str], version: Version, package_version: Version | None = None,
+) -> None:
+    """仅接受同 major.minor 的完整 patch 范围；版本限 1–3 段正式数字版本。"""
+    if any(
+        not re.fullmatch(r"[0-9]+(?:\.[0-9]+){0,2}", str(value))
+        for value in (version, package_version) if value is not None
+    ):
+        raise ValueError("研究包和 scheme 必须使用 1–3 段正式数字版本")
+    if package_version is not None and (
+        package_version.major, package_version.minor
+    ) != (version.major, version.minor):
+        raise ValueError("研究包主版本和次版本必须与 scheme 一致")
     parsed = [(text, Requirement(text)) for text in requirements]
     candidates = [(text, r) for text, r in parsed if canonicalize_name(r.name) == "scheme"]
     message = (
         "研究包必须声明兼容 scheme 的唯一范围："
-        f">=X.Y.Z,<{version.major + 1}.0.0（X={version.major}，无 URL、marker、extras）"
+        f">={version.major}.{version.minor}.0,<{version.major}.{version.minor + 1}.0"
+        "（无 URL、marker、extras）"
     )
     if len(candidates) != 1:
         raise ValueError(message)
     text, requirement = candidates[0]
     bounds = {specifier.operator: specifier.version for specifier in requirement.specifier}
-    minimum = bounds.get(">=", "")
     # SpecifierSet 会去重；原始声明也只能包含两个边界。
     if (requirement.url or requirement.marker or requirement.extras or text.count(",") != 1
             or len(requirement.specifier) != 2 or set(bounds) != {">=", "<"}
             or not all(re.fullmatch(r"[0-9]+(?:\.[0-9]+){0,2}", value) for value in bounds.values())
-            or Version(minimum).major != version.major
-            or Version(bounds["<"]) != Version(f"{version.major + 1}.0.0")):
+            or Version(bounds[">="]) != Version(f"{version.major}.{version.minor}.0")
+            or Version(bounds["<"]) != Version(f"{version.major}.{version.minor + 1}.0")):
         raise ValueError(message)
     if version not in requirement.specifier:
         raise ValueError(f"实际 scheme {version} 不满足研究包依赖：{requirement}")
@@ -92,9 +103,7 @@ def verify_component(component: Package) -> metadata.Distribution:
     if distribution.version != component.version:
         raise ValueError(f"{component.package} 实际安装版本不是 {component.version}")
     scheme = Version(metadata.version("scheme"))
-    if Version(component.version).major != scheme.major:
-        raise ValueError("研究包主版本必须与 scheme 一致")
-    validate_scheme_requirement(distribution.requires or [], scheme)
+    validate_scheme_requirement(distribution.requires or [], scheme, Version(component.version))
     with tempfile.TemporaryDirectory(prefix="solo-wheel-") as temporary:
         path = Path(temporary) / "component.whl"
         if component.wheel.startswith("https://"):
