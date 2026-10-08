@@ -118,14 +118,16 @@ def analyze_factors[P: FactorParams, A: FactorAnalysisParams](
                 replaceColumn!(soloPrices, `code,
                     dict(soloSourceCodes, soloEngineCodes)[string(soloPrices.code)])
                 soloFactorInput = lj(soloFactorSource, soloPrices, `time`code)
-                if (soloMarketWeight) {{
-                    if (any(isNull(soloFactorInput.circ_mv) || soloFactorInput.circ_mv <= 0))
-                        throw "市值加权需要每条因子记录具备正数 circ_mv"
-                }} else {{
+                if (!soloMarketWeight) {{
                     soloFactorInput[`circ_mv] = take(1.0, soloFactorInput.rows())
                 }}
                 soloFactorProcessed = factor::factorFilterNulls(soloFactorInput, soloFactors)
                 if (soloFactorProcessed.rows() == 0) throw "没有共同有效的因子样本"
+                // 只有参与分组的有效因子记录需要市值权重。
+                if (soloMarketWeight) {{
+                    if (any(isNull(soloFactorProcessed.circ_mv) || soloFactorProcessed.circ_mv <= 0))
+                        throw "市值加权需要每条有效因子记录具备正数 circ_mv"
+                }}
                 for (factorCol in soloFactors) {{
                     soloRanks = <select int(floor(
                         rank(_$factorCol, true, , true, `first, false) * soloGroups

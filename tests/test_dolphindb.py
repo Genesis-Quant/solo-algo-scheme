@@ -187,19 +187,19 @@ class TestFactor(Factor[FactorParams]):
         return pd.DataFrame({"score": [1.0, 2.0, 2.0, 1.0]}, index=index)
 
 
-@pytest.mark.parametrize("weight", ["equal", "market_value"])
-def test_real_factor_statistics(monkeypatch, tmp_path, weight):
-    prices = pd.DataFrame(
-        {
-            "time": np.repeat(pd.date_range("2025-01-02", periods=3), 2),
-            "code": ["000001.SZ", "600000.SH"] * 3,
-            "close": [10.0, 10.0, 5.5, 12.0, 6.6, 13.2],
-            "adj_factor": [1.0, 1.0, 2.0, 1.0, 2.0, 1.0],
-            "circ_mv": [1.0, 3.0] * 3,
-        }
-    )
+class SparseFactor(Factor[FactorParams]):
+    __test__ = False
 
-    def query_prices(request, *, session):
+    def compute(self, start: date, end: date) -> pd.DataFrame:
+        index = pd.MultiIndex.from_product(
+            [pd.date_range(start, periods=2), ["000001.XSHE", "000002.XSHE", "600000.XSHG"]],
+            names=["date", "symbol"],
+        )
+        return pd.DataFrame({"score": [1.0, np.nan, 2.0, 2.0, np.nan, 1.0]}, index=index)
+
+
+def query_prices(prices: pd.DataFrame):
+    def query(request, *, session):
         validated = FactorQuery.model_validate(request)
         session.upload(
             {
@@ -217,7 +217,21 @@ def test_real_factor_statistics(monkeypatch, tmp_path, weight):
         )
         return nullcontext(SimpleNamespace(data_ref="testReturns"))
 
-    monkeypatch.setattr("scheme.execute.factor.api.query", query_prices)
+    return query
+
+
+@pytest.mark.parametrize("weight", ["equal", "market_value"])
+def test_real_factor_statistics(monkeypatch, tmp_path, weight):
+    prices = pd.DataFrame(
+        {
+            "time": np.repeat(pd.date_range("2025-01-02", periods=3), 2),
+            "code": ["000001.SZ", "600000.SH"] * 3,
+            "close": [10.0, 10.0, 5.5, 12.0, 6.6, 13.2],
+            "adj_factor": [1.0, 1.0, 2.0, 1.0, 2.0, 1.0],
+            "circ_mv": [1.0, 3.0] * 3,
+        }
+    )
+    monkeypatch.setattr("scheme.execute.factor.api.query", query_prices(prices))
     result = analyze_factors(
         TestFactor(FactorParams(start="2025-01-02", end="2025-01-04")),
         FactorAnalysisParams(
@@ -245,6 +259,41 @@ def test_real_factor_statistics(monkeypatch, tmp_path, weight):
     )
     for path in result.save(tmp_path):
         pd.read_parquet(path)
+
+
+@pytest.mark.parametrize("missing_cap", ["000002.SZ", "600000.SH"])
+def test_real_market_weight_checks_only_valid_factor_rows(monkeypatch, missing_cap):
+    prices = pd.DataFrame(
+        {
+            "time": np.repeat(pd.date_range("2025-01-02", periods=3), 3),
+            "code": ["000001.SZ", "000002.SZ", "600000.SH"] * 3,
+            "close": [10.0, 8.0, 10.0, 5.5, 8.0, 12.0, 6.6, 8.0, 13.2],
+            "adj_factor": [1.0, 1.0, 1.0, 2.0, 1.0, 1.0, 2.0, 1.0, 1.0],
+            "circ_mv": [1.0, 2.0, 3.0] * 3,
+        }
+    )
+    prices.loc[prices.code == missing_cap, "circ_mv"] = np.nan
+    monkeypatch.setattr("scheme.execute.factor.api.query", query_prices(prices))
+    params = FactorAnalysisParams(
+        start="2025-01-02",
+        end="2025-01-04",
+        columns=["score"],
+        return_periods=[1],
+        groups=2,
+        n_select=1,
+        calendar_symbol="000001.XSHE",
+        weight="market_value",
+    )
+    factor = SparseFactor(FactorParams(start="2025-01-02", end="2025-01-04"))
+    if missing_cap == "600000.SH":
+        with pytest.raises(RuntimeError, match="有效因子记录具备正数 circ_mv"):
+            analyze_factors(factor, params)
+        return
+    result = analyze_factors(factor, params)
+    assert result.processed_data.code.tolist() == ["000001.XSHE", "600000.XSHG"] * 2
+    assert result.processed_data.circ_mv.tolist() == [1.0, 3.0] * 2
+    assert result.execution_statistics.source_count.tolist() == [3, 3]
+    assert result.execution_statistics.filtered_count.tolist() == [2, 2]
 
 
 def test_real_factor_query_pipeline():
