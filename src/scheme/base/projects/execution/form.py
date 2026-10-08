@@ -14,8 +14,8 @@ __all__ = ["ExecutionReportForm"]
 
 
 class ExecutionReportForm(ReportForm[ExecutionAnalysisParams]):
-    start: date = Field(title="开始日期")
-    end: date = Field(title="结束日期（不含）")
+    start: date = Field(default=date(2020, 1, 1), title="开始日期")
+    end: date = Field(default=date(2027, 1, 1), title="结束日期（不含）")
     pool: Literal[
         StockPool.ALL, StockPool.SSE50, StockPool.CSI300, StockPool.CSI500, StockPool.CSI1000
     ] = Field(default=StockPool.CSI300, title="股票池")

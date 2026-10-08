@@ -41,6 +41,7 @@ from scheme.execute.strategy.assembly import (
     validate_context,
 )
 from scheme.execute.strategy.result import BacktestResult
+from scheme.manage.parameters import defaults
 
 DATES = {"start": "2025-01-01", "end": "2025-01-03"}
 STAGES = (
@@ -183,7 +184,9 @@ def test_concrete_form_has_only_exact_report_form_base_and_explicit_fields(
     assert get_type_hints(form.build)["return"] is analysis
     schema = form.model_json_schema()
     assert set(schema["properties"]) == set(form.__annotations__)
-    assert {"start", "end"} <= set(schema["required"])
+    assert not {"start", "end"} & set(schema.get("required", []))
+    assert schema["properties"]["start"]["default"] == "2020-01-01"
+    assert schema["properties"]["end"]["default"] == "2027-01-01"
     assert schema["additionalProperties"] is False
     assert {"start", "end", "pool", "lookback"} <= set(schema["properties"])
     assert not {"universe", "config", "symbols"} & set(schema["properties"])
@@ -195,6 +198,43 @@ def test_concrete_form_has_only_exact_report_form_base_and_explicit_fields(
             form.model_validate({**DATES, **values, hidden: {}})
         assert any(item["loc"] == (hidden,) and item["type"] == "extra_forbidden"
                    for item in error.value.errors())
+
+
+@pytest.mark.parametrize("runtime,analysis,form,values", FORMS)
+def test_form_defaults_are_exposed_as_json_and_build_without_dates(
+    runtime, analysis, form, values,
+):
+    initial = defaults(form)
+    assert initial["start"] == "2020-01-01"
+    assert initial["end"] == "2027-01-01"
+    assert initial["pool"] == StockPool.CSI300
+    assert initial["lookback"] == "PT0S"
+    built = form.model_validate({**initial, **values}).build()
+    assert type(built) is analysis
+    assert (built.start, built.end) == (date(2020, 1, 1), date(2027, 1, 1))
+    assert built.universe.pool == StockPool.CSI300
+    assert built.universe.lookback == timedelta(0)
+    overridden = form.model_validate({**initial, **values, **DATES}).build()
+    assert (overridden.start, overridden.end) == (date(2025, 1, 1), date(2025, 1, 3))
+
+
+def test_factor_form_defaults_match_web_research_settings():
+    initial = defaults(FactorReportForm)
+    assert initial == {
+        "start": "2020-01-01", "end": "2027-01-01", "pool": StockPool.CSI300,
+        "lookback": "PT0S", "return_periods": [1, 5, 20], "groups": 5,
+        "n_select": 10, "weight": "market_value", "calendar_symbol": "000300.XSHG",
+    }
+    assert FactorReportForm.model_fields["columns"].is_required()
+    built = FactorReportForm(columns=["momentum"]).build()
+    assert built.return_periods == [1, 5, 20]
+    assert built.groups == 5
+    assert built.n_select == 10
+    assert built.weight == "market_value"
+    assert built.calendar_symbol == "000300.XSHG"
+    first = FactorReportForm(columns=["momentum"])
+    first.return_periods.append(60)
+    assert FactorReportForm(columns=["momentum"]).return_periods == [1, 5, 20]
 
 
 @pytest.mark.parametrize("runtime,analysis,form,values", FORMS)
