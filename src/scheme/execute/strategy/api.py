@@ -123,6 +123,8 @@ class ResearchBacktest[C: BaseModel](Backtest[C]):
                 soloMessages = soloTickMessages(soloSnapshotRows, soloSnapshotReference, soloUniverse)
             """)
         else:
+            # 停牌、未上市或已退市证券当日没有日线，不能成交，也不合成快照。
+            frame = frame[frame[["open", "close", "pre_close"]].notna().any(axis=1)]
             if frame.empty:
                 self.session.run("soloMessages = table(array(TIMESTAMP,0) as timestamp)")
                 return DosVar("soloMessages")
