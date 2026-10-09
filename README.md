@@ -110,7 +110,7 @@ scheme run --input /shared/tasks/123/input.json --output /shared/tasks/123/repor
 kind 分别为 factor、model、optimize、control、execution、strategy，对应各自执行入口；strategy 用于完整策略组装。当前除 factor 外，各入口暂时复用回测报告实现。
 报告类型由结果对象决定，单独写入 run.json 的 report_kind，任务 kind 始终保留原值。输出 Parquet 后，最后原子写入协议版本 1 的 run.json。
 完成清单包含原始输入、锁文件和各报告文件的 SHA256，以及实际安装版本。
-完整输入示例位于根工作区 runtime/examples，进程协议见 runtime/README.md。
+任务输入由 Scheme 参数模型定义，进程协议见根工作区 runtime/README.md。
 
 Jupyter SDK 使用 `scheme.base`、`scheme.execute`、`scheme.data`。
 连接变量沿用 Arena：`DOLPHIN_HOST`、`DOLPHIN_PORT`、`DOLPHIN_RUNTIME_USERNAME`、
