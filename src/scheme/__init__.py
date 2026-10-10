@@ -44,7 +44,7 @@ from .execute.strategy.assembly import AlgoComponents, Strategy
 from .execute.strategy.components import algo_options
 from .log import configure as _configure_logging
 
-# Arena 在导入时把逐步查询日志设为 DEBUG 级输出；研究进程改用 Scheme 的统一格式与级别。
+# 沿用 Arena 日志格式，研究进程默认只显示 INFO 及以上。
 _configure_logging()
 
 __all__ = [
