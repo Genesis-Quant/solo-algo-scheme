@@ -49,9 +49,43 @@ scheme/
 
 - `FactorParams`、`StrategyParams` 是构造因子和组装策略需要的运行参数，包含 `start`、`end`、`universe`。四类 Algo 的 Params 只声明自身算法字段，从统一策略参数提取，不携带回测配置。
 - `FactorAnalysisParams(FactorParams)` 增加 `columns`、`return_periods` 等分析选项，`StrategyAnalysisParams(StrategyParams)` 增加行情、基准和回测引擎设置；都实现 `run` 并返回报告。各环节的 `Model/Optimize/Control/ExecutionAnalysisParams` 直接继承对应的 Algo Params，增加独立研究所需的日期、股票池、回测设置和上游选择。
-- 所有 Form 只继承 `ReportForm[具体AnalysisParams]`，显式声明 UI 输入并实现 `build()`，把 `pool/lookback` 转换为 `Universe`、把资金费率转换为引擎配置。Form 不继承 Params 或 AnalysisParams，不执行研究；跨字段校验发生在 `build()` 构造分析参数时。
+- 五类公共 Form 由 Scheme 提供，项目只绑定自己的 AnalysisParams。`start/end/pool/lookback` 统一定义；四类策略环节还共享行情、基准、资金和费率。Scheme 负责 `pool/lookback → Universe`、资金费率 → `config` 以及 `build()`，不执行研究。
 
-项目自定义 AnalysisParams 同时继承本项目的具体 Params 与对应 Scheme AnalysisParams，保证算法字段是真正的 Pydantic 字段，而不是仅存在于额外字段中。项目 Form 的泛型和 `build()` 返回该具体 AnalysisParams。运行时根据 Factor/Algo 的参数泛型构造新的具体 Params，只传算法声明的字段，不把分析字段泄漏给算法。
+项目自定义 AnalysisParams 同时继承本项目的具体 Params 与对应 Scheme AnalysisParams；算法字段只在 Params 声明一次。公共 Form 会自动读取具体 AnalysisParams 的字段、默认值、约束和 JSON Schema 元数据，`build()` 返回该具体类型，并执行它的字段及跨字段校验。运行时根据 Factor/Algo 的参数泛型构造新的具体 Params，只传算法声明的字段，不把分析字段泄漏给算法。
+
+### 项目表单的最小写法（1.3.0 起）
+
+```python
+from pydantic import Field
+from scheme.base import ModelParams as BaseModelParams
+from scheme.base import ModelAnalysisParams as BaseModelAnalysisParams
+from scheme.base import ModelReportForm as BaseModelReportForm
+
+class ModelParams(BaseModelParams):
+    n_select: int = Field(default=10, ge=1, title="选股数量")
+
+class ModelAnalysisParams(ModelParams, BaseModelAnalysisParams):
+    pass
+
+class ModelReportForm(BaseModelReportForm[ModelAnalysisParams]):
+    pass
+```
+
+这里不需要再声明日期、股票池、手续费、选股数量，也不需要项目自己实现 `build()`。
+Factor、Optimize、Control、Execution 使用对应的公共 Form，同样只绑定具体分析类型。
+Factor 的项目输出列可以在项目 AnalysisParams 中声明一次，例如
+`columns: list[str] = Field(default_factory=lambda: ["momentum"], min_length=1, title="因子列")`。
+确实需要不同 UI 默认值时，仍可在 Form 子类覆盖对应字段。
+
+- Form 保留既有 UI 默认：日期 `2020-01-01` 至 `2027-01-01`（不含结束日），股票池沪深 300；运行参数的日期仍必填。
+- 基础分析字段未被项目覆盖时沿用 Scheme 的 UI 默认；项目显式重新声明的字段保留项目约束和默认。Factor 表单的市值加权默认不会被 Analysis 的等权默认意外覆盖。
+- 算法的 Pydantic decorator validators 在 `build()` 构造具体 AnalysisParams 时执行，不要求表单提前具备 `universe/config`；`build()` 不会调用 `run()`。从项目 AnalysisParams 自动带出的字段保留原始输入和 Schema，将转换、约束及模型校验统一推迟到 `build()`，避免转换两次或绕过算法的 strict/字符串规范化配置。不能把单独构造 Form 当作完整研究参数已经校验通过。
+- 自动表单支持无参 `default_factory`；依赖其他已校验字段的默认工厂无法独立生成 UI 默认值，会在绑定时明确拒绝。字段间推导请放到 AnalysisParams 的 `model_validator`，或继续使用自定义 `ReportForm`。
+- `universe/config/symbols` 不直接暴露为 UI 输入。自定义股票池或引擎配置可以直接构造 AnalysisParams；策略 AnalysisParams 的额外 `config` 默认项会保留，资金和费率由表单输入决定。
+- `pool/lookback/cash/commission/tax` 等表单转换字段及表单方法名不能再作为另一个含义的算法字段；冲突明确报错，不静默覆盖。validation alias 保持唯一；不能表示为扁平输入的纯 `AliasPath` 明确拒绝。
+- 旧的 `ReportForm[具体AnalysisParams]` 加手写 `build()` 仍受支持，未参数化的 Scheme 公共 Form 仍可直接使用。
+
+这种写法依赖 Scheme 1.3 的公共泛型表单，Algo 模板 1.3.x 因此声明 `scheme>=1.3.0,<1.4.0`。1.2.x 项目继续使用各自锁定的 Scheme 和手写 Form，不会被自动迁移。
 
 各项目导出对应的算法、Params、AnalysisParams 和 ReportForm。Factor 的 `params.run(Factor)` 接受类并自动构造其泛型声明的参数；四类 Algo 的 `params.run(当前Algo)` 根据上游选择组装完整策略。内置后续选项为 risk_parity（风险平价）、no_control（不风控）、direct_execution（不拆单）。Context 从 ModelAlgo 泛型解析，也可通过 `run(..., ctx=实例)` 传入。
 
@@ -76,6 +110,14 @@ algos.model 指向冻结的候选包，backtest 保存表单构建后的参数�
 Worker 使用锁文件中的 Scheme 默认实现；显式指定的下游包优先于默认实现。
 
 Algo 包与 Scheme 的主版本、次版本必须一致，补丁版本可独立迭代。包声明整个主次版本系列，例如 `scheme>=1.2.0,<1.3.0`，因此 Scheme 1.2.0 与 1.2.7 均可用于 1.2.x 项目，不允许与 1.1.x 或 1.3.x 混用。下界必须为该系列的补丁 0，上界必须为下一次版本的补丁 0；不接受补丁版本下界、精确版本、直接 Git/URL、条件依赖或跨次版本范围。模板选择、上游项目安装、策略组装和正式 wheel 校验使用同一兼容边界。项目和正式任务仍使用 uv source 与锁文件精确固定实际版本，兼容不等于自动升级或放宽锁文件、wheel 身份校验。其他共享依赖仍须可共同解析。
+
+### 1.3.0 公共研究表单与 URL 报告展示
+
+五类 ReportForm 改为可绑定项目 AnalysisParams 的公共泛型表单。`start/end/pool/lookback`，以及策略环节的行情、基准、资金、费率和上下游选择，统一由 Scheme 声明并转换；项目算法字段只在 Params 声明一次，表单自动带出其默认值、约束和 Schema。`build()` 返回项目的具体 AnalysisParams，并执行其字段与跨字段校验。保存版本、策略组装的任务 JSON、报告文件和 Runtime 协议不变；旧式 `ReportForm[具体AnalysisParams]` 加手写 `build()`、直接使用 Scheme 公共 Form 仍然可用。
+
+新模板在导入时就依赖公共泛型表单，旧的 1.2.x Scheme 无法加载，因此升级次版本，而不是发布 1.2.x 补丁。按主次版本契约，1.3.x 项目不能与 1.2.x 项目互为上游或组装到同一策略；已有 1.2.x 项目、版本、成果和报告继续使用各自锁定的 Scheme，不自动迁移。
+
+`report.show()` 改由 Solo Jupyter 启动桥接，以 URL iframe 复用前端报告页面，不再在 Notebook 输出中内嵌 `srcdoc`；独立导出仍使用 `report.to_html()`。
 
 ### 1.2.3 日线回测停牌与未上市证券修复
 
@@ -191,19 +233,21 @@ report = run_backtest(algos, ctx, StrategyAnalysisParams(
 report.show()
 ```
 
-`report.show()` 在 Notebook 中展示内置的完整交互页面，直接复用 Solo 前端的
-`FactorAnalysisReport` 和 `BacktestReport`，包括图表、统计指标、日期筛选、收益周期切换、
-回测明细表的筛选/排序/分页/导出和日夜模式。因子分析结果自动保留分析参数，不需要重复传入。
-可设置 `height=1000`、`theme="dark"`；回测支持 `annual_trading_days=252` 和 `risk_free_rate=0.0`。
+`report.show()` 需要通过 Solo 启动 Jupyter Server，由启动桥接在 IPython shell 上安装
+`solo_report_display` provider。provider 通过 Jupyter 文件后端提供报告数据，以 URL iframe
+复用 Solo 前端的 `FactorAnalysisReport` 和 `BacktestReport`；不再内嵌页面或回退到 `srcdoc`。
+因子分析结果自动保留分析参数，不需要重复传入。可设置 `height=1000`、`theme="dark"`；
+回测支持 `annual_trading_days=252` 和 `risk_free_rate=0.0`，参数校验和显示由 provider 负责。
+未安装 IPython、没有 shell 或可调用 provider 时会明确报错，可改用 `report.to_html()` 独立导出。
 `report.preview(name)` 仍用于直接查看 DataFrame。
 
-`Path("report.html").write_text(report.to_html(), encoding="utf-8")` 可导出独立交互报告。
-页面、DuckDB WASM、图表组件及数据全部内嵌，不连接前端服务或 CDN；保存 Notebook 输出会包含这些资源。
-Notebook 需使用可信输出，Kernel 需安装 IPython（项目的 ipykernel 已包含）。
+`Path("report.html").write_text(report.to_html(), encoding="utf-8")` 的独立导出接口及现有实现保持不变，
+不依赖上述 provider。页面、DuckDB WASM、图表组件及数据仍按原实现内嵌，不连接前端服务或 CDN；
+`show()` 的 URL 展示不改变独立 HTML 的离线 Parquet 加载方式。
 
-维护报告页面时，在工作区 `frontend` 执行 `npm ci`、`npm run build:scheme`，
+维护独立 HTML 报告资源时，在工作区 `frontend` 执行 `npm ci`、`npm run build:scheme`，
 把同一套前端组件编译到 `scheme/report/assets`，然后构建 Scheme wheel。
-运行或安装 Scheme 不需要 Node.js、前端源码或单独服务。
+安装 Scheme 不需要 Node.js 或前端源码；`show()` 展示依赖上述 Solo Jupyter 服务与桥接。
 
 所有日期采用 [start, end)，回测入口转换为插件的包含结束日配置。日线合成每日开盘、收盘两份快照，
 要求真实涨跌停价，不使用当日高低价推算开盘可见范围；合成盘口近似无限流动性，不用于衡量真实冲击成本。

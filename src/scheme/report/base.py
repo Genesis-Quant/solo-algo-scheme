@@ -20,23 +20,26 @@ class Report:
         annual_trading_days: int = 252,
         risk_free_rate: float = 0.0,
     ) -> None:
-        """在 Jupyter 展示与前端相同的完整交互报告，不需要前端服务。"""
-        from IPython.display import display
+        """通过 Solo Jupyter 启动桥接提供的 URL iframe 展示交互报告。"""
+        message = (
+            "report.show() 需要通过 Solo 启动 Jupyter Server，由启动桥接在 IPython shell 上"
+            "提供 solo_report_display；独立导出请使用 report.to_html()。"
+        )
+        try:
+            from IPython import get_ipython
+        except ImportError as error:
+            raise RuntimeError(message) from error
 
-        from scheme.report import notebook_html
-
-        display(
-            {
-                "text/html": notebook_html(
-                    self,
-                    height=height,
-                    theme=theme,
-                    annual_trading_days=annual_trading_days,
-                    risk_free_rate=risk_free_rate,
-                ),
-                "text/plain": "Scheme 交互研究报告",
-            },
-            raw=True,
+        shell = get_ipython()
+        provider = getattr(shell, "solo_report_display", None)
+        if not callable(provider):
+            raise RuntimeError(message)
+        provider(
+            self,
+            height=height,
+            theme=theme,
+            annual_trading_days=annual_trading_days,
+            risk_free_rate=risk_free_rate,
         )
 
     def to_html(

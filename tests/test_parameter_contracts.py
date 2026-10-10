@@ -1,9 +1,8 @@
 """Focused parameter/form/projection contracts, without research services or output."""
 
-from abc import ABC
 from dataclasses import fields, is_dataclass
 from datetime import date, timedelta
-from typing import Generic, Self, assert_type, get_args, get_origin, get_type_hints
+from typing import Self, assert_type, get_args, get_origin, get_type_hints
 from unittest.mock import Mock
 
 import pandas as pd
@@ -169,21 +168,16 @@ def test_stage_params_are_algorithm_only_and_analysis_declares_own_runtime(
 
 
 @pytest.mark.parametrize("runtime,analysis,form,values", FORMS)
-def test_concrete_form_has_only_exact_report_form_base_and_explicit_fields(
+def test_shared_form_preserves_ui_and_concrete_analysis_contract(
     runtime, analysis, form, values,
 ):
-    specialized = ReportForm[analysis]
-    assert form.__bases__ == (specialized,)
-    assert form.__mro__ == (form, specialized, ReportForm, BaseModel, ABC, Generic, object)
-    assert specialized.__pydantic_generic_metadata__["args"] == (analysis,)
+    assert issubclass(form, ReportForm)
     assert ReportForm.model_fields == {}
+    assert form.analysis_model() is analysis
     assert not issubclass(form, runtime)
     assert not issubclass(form, analysis)
-    assert set(form.model_fields) == set(form.__annotations__)
-    assert "build" in form.__dict__
-    assert get_type_hints(form.build)["return"] is analysis
     schema = form.model_json_schema()
-    assert set(schema["properties"]) == set(form.__annotations__)
+    assert set(schema["properties"]) == set(form.model_fields)
     assert not {"start", "end"} & set(schema.get("required", []))
     assert schema["properties"]["start"]["default"] == "2020-01-01"
     assert schema["properties"]["end"]["default"] == "2027-01-01"

@@ -1,25 +1,20 @@
 """用于 UI 的因子分析表单。"""
 
-from datetime import date, timedelta
 from typing import Literal
 
 from pydantic import Field
 
-from scheme.base.internal.form import ReportForm
-from scheme.data.dolphindb.universe import StockPool, Universe
+from scheme.base.internal.form import ResearchForm
 
 from .params import FactorAnalysisParams
 
 __all__ = ["FactorReportForm"]
 
 
-class FactorReportForm(ReportForm[FactorAnalysisParams]):
-    start: date = Field(default=date(2020, 1, 1), title="开始日期")
-    end: date = Field(default=date(2027, 1, 1), title="结束日期（不含）")
-    pool: Literal[
-        StockPool.ALL, StockPool.SSE50, StockPool.CSI300, StockPool.CSI500, StockPool.CSI1000
-    ] = Field(default=StockPool.CSI300, title="股票池")
-    lookback: timedelta = Field(default=timedelta(0), title="回溯周期")
+class FactorReportForm[P: FactorAnalysisParams](ResearchForm[P]):
+    _analysis_base = FactorAnalysisParams
+    _analysis_model = FactorAnalysisParams
+
     columns: list[str] = Field(min_length=1, title="因子列")
     return_periods: list[int] = Field(
         default_factory=lambda: [1, 5, 20], min_length=1, title="收益持有期"
@@ -31,9 +26,3 @@ class FactorReportForm(ReportForm[FactorAnalysisParams]):
         json_schema_extra={"x-enum-labels": ["等权", "市值加权"]},
     )
     calendar_symbol: str = Field(default="000300.XSHG", title="交易日历代码")
-
-    def build(self) -> FactorAnalysisParams:
-        return FactorAnalysisParams(
-            **self.model_dump(exclude={"pool", "lookback"}),
-            universe=Universe.model_validate({"pool": self.pool, "lookback": self.lookback}),
-        )

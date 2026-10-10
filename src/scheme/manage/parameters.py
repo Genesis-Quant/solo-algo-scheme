@@ -106,7 +106,14 @@ def defaults(model: type[BaseModel]) -> dict[str, Any]:
 
 
 def _analysis_type(form: type[ReportForm], expected: type[BaseModel]) -> type[BaseModel]:
-    """Pydantic 将具体 ReportForm 泛型保存在参数化父类，而非项目子类上。"""
+    """解析公共自动表单或旧式手写 ReportForm 的具体分析类型。"""
+    from scheme.base.internal.form import ResearchForm
+
+    if issubclass(form, ResearchForm):
+        model = form.analysis_model()
+        if not issubclass(model, expected):
+            raise ValueError(f"{form.__name__} 必须绑定 {expected.__name__} 或其分析子类")
+        return model
     for base in form.__mro__:
         generic = base.__dict__.get("__pydantic_generic_metadata__", {})
         if generic.get("origin") is ReportForm:
