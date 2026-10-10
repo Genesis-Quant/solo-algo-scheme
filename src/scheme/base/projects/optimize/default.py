@@ -16,8 +16,11 @@ from scheme.base.projects.optimize import OptimizeAlgo
 from scheme.base.projects.optimize import OptimizeParams as BaseOptimizeParams
 from scheme.data import query
 from scheme.data.dolphindb.symbols import engine_symbol, normalize_assets, source_symbol
+from scheme.log import get_logger
 
 __all__ = ["risk_parity", "OptimizeParams", "RiskParity"]
+
+log = get_logger("scheme.optimize")
 
 
 def risk_parity(returns: pd.DataFrame) -> tuple[np.ndarray, str | None]:
@@ -102,4 +105,12 @@ class RiskParity[C: ResearchContext[Any]](OptimizeAlgo[OptimizeParams, C]):
                 "reason": reason,
             }
         )
+        if reason:
+            log.warning("风险平价退化为等权：{}（{} 只）", reason, len(symbols))
+        else:
+            log.debug(
+                "风险平价分配 {} 只，总仓位 {:.0%}，最大权重 {:.2%}",
+                len(symbols), self.params.gross_exposure,
+                max((abs(value) for value in target.values()), default=0.0),
+            )
         return target

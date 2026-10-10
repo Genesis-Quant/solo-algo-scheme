@@ -10,8 +10,11 @@ from scheme.base.internal.context import ResearchContext
 from scheme.base.internal.types import Order, Target
 from scheme.base.projects.control import ControlAlgo
 from scheme.base.projects.control import ControlParams as BaseControlParams
+from scheme.log import get_logger
 
 __all__ = ["ControlParams", "NoControl"]
+
+log = get_logger("scheme.control")
 
 
 class ControlParams(BaseControlParams):
@@ -23,7 +26,14 @@ class NoControl[C: ResearchContext[Any]](ControlAlgo[ControlParams, C]):
         super().__init__(params if params is not None else ControlParams())
 
     def on_target(self, target: Target) -> None:
-        self.ctx.orders = self.target_orders(target)
+        orders = self.target_orders(target)
+        log.debug(
+            "目标 {} 只 → 订单 {} 笔（买入 {}，卖出 {}）",
+            sum(1 for weight in target.values() if weight), len(orders),
+            sum(1 for order in orders if order.direction.name.startswith("BUY")),
+            sum(1 for order in orders if order.direction.name.startswith("SELL")),
+        )
+        self.ctx.orders = orders
 
     def target_orders(self, target: Target) -> list[Order]:
         return super().target_orders(target, lot_size=self.params.lot_size)

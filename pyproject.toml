@@ -1,6 +1,6 @@
 [project]
 name = "scheme"
-version = "1.3.1"
+version = "1.3.2"
 description = "Solo research interfaces, strategy assembly and execution."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -11,8 +11,9 @@ dependencies = [
     "scipy>=1.14",
     "pyarrow>=21",
     "packaging>=24",
+    "loguru>=0.7,<0.8",
     "tushare>=1.4.29,<2",
-    "backtest @ git+https://gitee.com/genesis-quant/backtest@d6ea13caec7f049ac32b715486636f38fccfab79",
+    "backtest @ git+https://gitee.com/genesis-quant/backtest@2337db10c16d927842c6497f3b74b9561dd4dcda",
     "arena-runtime @ git+https://gitee.com/genesis-quant/arena-runtime@eeebfe417aa999fa1e386cbd62b74326a5dab66c",
 ]
 

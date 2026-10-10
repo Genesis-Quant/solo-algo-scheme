@@ -1,4 +1,5 @@
 from datetime import timedelta
+from time import perf_counter
 
 import numpy as np
 import pandas as pd
@@ -8,8 +9,11 @@ from scheme.config import DolphinSettings
 from scheme.data import query
 from scheme.data.dolphindb.database import create_session
 from scheme.data.dolphindb.symbols import engine_symbol, source_symbol
+from scheme.log import get_logger
 
 from .result import FactorAnalysisResult
+
+log = get_logger("scheme.factor")
 
 
 def prepare_panel(panel: pd.DataFrame, parameters: FactorAnalysisParams) -> pd.DataFrame:
@@ -42,7 +46,18 @@ def analyze_factors[P: FactorParams, A: FactorAnalysisParams](
     settings: DolphinSettings | None = None,
 ) -> FactorAnalysisResult[A]:
     settings = settings or DolphinSettings.from_env()
+    started = perf_counter()
+    log.info(
+        "因子分析：{} {} 至 {}（不含），因子列 {}，收益期 {}，{} 组，{}",
+        type(factor).__name__, parameters.start, parameters.end, ", ".join(parameters.columns),
+        parameters.return_periods, parameters.groups,
+        "市值加权" if parameters.weight == "market_value" else "等权",
+    )
     source = prepare_panel(factor.compute(parameters.start, parameters.end), parameters)
+    log.info(
+        "因子计算完成：{} 条记录，{} 只证券，{} 个交易日，用时 {:.1f} 秒",
+        len(source), source.code.nunique(), source.time.nunique(), perf_counter() - started,
+    )
     with create_session(settings) as session:
         # 日历缓冲只用于读取；尾部不足的未来收益保留 NULL，不填零。
         end = parameters.end + timedelta(days=max(parameters.return_periods) * 4 + 30)
@@ -153,4 +168,8 @@ def analyze_factors[P: FactorParams, A: FactorAnalysisParams](
                     'factor::factorGroupTurnover(soloFactorProcessed, soloFactors, soloPeriods, soloGroups, soloSelect, "time", "code", distinct(soloFactorSource.time))'
                 ),
             )
+    log.info(
+        "因子分析完成：有效样本 {} 条，总用时 {:.1f} 秒",
+        len(report.processed_data), perf_counter() - started,
+    )
     return report

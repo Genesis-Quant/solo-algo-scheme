@@ -1,9 +1,12 @@
 import hashlib
 import json
 
+from scheme.log import get_logger
 from scheme.report.base import Report
 
 from .schema import Task
+
+log = get_logger("scheme.task")
 
 
 def check_output(task: Task) -> None:
@@ -39,3 +42,8 @@ def save_run(task: Task, result: Report, versions: dict[str, str], *, input_sha2
         encoding="utf-8",
     )
     temporary.replace(task.output / "run.json")
+    log.info(
+        "报告已保存：{} 个文件（{}），共 {:.1f} MB → {}",
+        len(paths), ", ".join(path.name for path in paths),
+        sum(path.stat().st_size for path in paths) / 2**20, task.output,
+    )

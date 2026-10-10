@@ -17,8 +17,11 @@ from packaging.utils import canonicalize_name
 from packaging.version import Version
 
 from scheme.execute.strategy.assembly import parameter_type
+from scheme.log import get_logger
 
 from .schema import Component, Environment, Package
+
+log = get_logger("scheme.task")
 
 
 def validate_environment(environment: Environment) -> dict[str, str]:
@@ -60,6 +63,11 @@ def validate_environment(environment: Environment) -> dict[str, str]:
                     vcs.get("requested_revision"),
                 }:
                     raise ValueError(f"{name} Git commit 与依赖声明不一致")
+    log.info(
+        "任务环境与锁文件一致：{} 个包，scheme {}，backtest {}，arena-runtime {}", len(actual),
+        actual.get("scheme", "-"), actual.get("backtest", "-"), actual.get("arena-runtime", "-"),
+    )
+    log.debug("任务环境：{}", "，".join(f"{name} {version}" for name, version in sorted(actual.items())))
     return actual
 
 

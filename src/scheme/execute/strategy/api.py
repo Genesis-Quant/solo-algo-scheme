@@ -2,6 +2,7 @@ from collections.abc import Sequence
 from datetime import timedelta
 from functools import cached_property
 from importlib.resources import files
+from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
@@ -11,7 +12,9 @@ from backtest import (
     DailyPortfolio,
     DailyPosition,
     DailyTradingStatistics,
+    Direction,
     DosVar,
+    OrderStatus,
     TradeDetail,
 )
 from pydantic import BaseModel
@@ -22,8 +25,11 @@ from scheme.data import query
 from scheme.data.dolphindb.symbols import engine_symbol, source_symbol
 from scheme.execute.strategy.assembly import validate_context
 from scheme.execute.strategy.engine import Backtest
+from scheme.log import duration, get_logger, mark_simulation
 
 from .result import BacktestResult
+
+log = get_logger("scheme.backtest")
 
 
 class ResearchBacktest[C: BaseModel](Backtest[C]):
@@ -138,7 +144,14 @@ class ResearchBacktest[C: BaseModel](Backtest[C]):
     @cached_property
     def universe(self) -> pd.DataFrame:
         """供 Algo 按日期读取动态股票池；行情覆盖期间成员的并集。"""
-        return self.parameters.universe.evaluate(self.parameters.start, self.parameters.end)
+        started = perf_counter()
+        members = self.parameters.universe.evaluate(self.parameters.start, self.parameters.end)
+        log.info(
+            "股票池 {}：{} 个交易日，期间成员 {} 只，用时 {:.1f} 秒",
+            self.parameters.universe.pool, len(members.index), len(members.columns),
+            perf_counter() - started,
+        )
+        return members
 
 
 def records_frame(records: Sequence[BaseModel], model: type[BaseModel]) -> pd.DataFrame:
@@ -161,6 +174,69 @@ def run_backtest[C: ResearchContext[Any], A: StrategyAnalysisParams](
         if not isinstance(algo, Algo):
             raise TypeError("算法必须继承当前 scheme 的 Algo")
         validate_context(algo, ctx)
+    config = {"cash": 1_000_000.0, "commission": 0.0003, "tax": 0.0005, **parameters.config}
+    log.info(
+        "回测开始：{} 至 {}（不含），{}，每批 {} 天；资金 {:,.0f}，佣金 {:.4%}，印花税 {:.4%}，基准 {}；"
+        "算法 {}",
+        parameters.start, parameters.end, parameters.market_data, parameters.batch_days,
+        config["cash"], config["commission"], config["tax"], parameters.benchmark or "无",
+        " → ".join(type(algo).__name__ for algo in algos),
+    )
+    started = perf_counter()
+    try:
+        result = _run(algos, ctx, parameters, settings, engine_type)
+    finally:
+        mark_simulation(None)
+    try:
+        _summarize(result, perf_counter() - started)
+    except Exception:
+        # 汇总日志不能让已经完成的回测失败。
+        log.opt(exception=True).warning("回测结果汇总失败")
+    return result
+
+
+def _summarize(result: BacktestResult[Any], seconds: float) -> None:
+    """回测结束的收益、费用和订单汇总；拒单按插件返回的原因归类为警告。"""
+    portfolios = result.daily_portfolios
+    if portfolios.empty:
+        log.warning("回测没有生成账户记录，用时 {}", duration(seconds))
+        return
+    net_value = portfolios.netValue
+    drawdown = (1 - net_value / net_value.cummax()).max()
+    benchmark = (
+        f"{portfolios.benchmarkNetValue.iloc[-1] - 1:+.2%}"
+        if "benchmarkNetValue" in portfolios else "无"
+    )
+    details = result.trade_details
+    orders = details.orderId.nunique()
+    filled = details.loc[details.orderStatus == OrderStatus.FILLED, "orderId"].nunique()
+    rejected = details[details.orderStatus == OrderStatus.REJECTED]
+    log.info(
+        "回测完成：{} 至 {} 共 {} 个交易日，用时 {}；净值 {:.4f}（{:+.2%}），基准 {}，"
+        "最大回撤 {:.2%}，手续费 {:,.0f}；订单 {}，全部成交 {}，拒单 {}",
+        portfolios.tradeDate.iloc[0], portfolios.tradeDate.iloc[-1], len(portfolios),
+        duration(seconds), net_value.iloc[-1], net_value.iloc[-1] - 1, benchmark, drawdown,
+        portfolios.totalFee.iloc[-1], orders, filled, rejected.orderId.nunique(),
+    )
+    if not rejected.empty:
+        rejected = rejected.drop_duplicates("orderId")
+        buys = int(rejected.direction.isin([Direction.BUY_OPEN, Direction.BUY_CLOSE]).sum())
+        reasons = rejected.orderInfo.dropna().astype(str).str.strip()
+        reasons = reasons[reasons != ""].value_counts().head(3)
+        log.warning(
+            "拒单 {} 笔（买入 {}，卖出 {}）：{}", len(rejected), buys, len(rejected) - buys,
+            "；".join(f"{reason} {count} 笔" for reason, count in reasons.items())
+            if not reasons.empty else "插件未返回原因，DEBUG 日志含逐笔明细",
+        )
+
+
+def _run[C: ResearchContext[Any], A: StrategyAnalysisParams](
+    algos: Sequence[Algo[Any, C]],
+    ctx: C,
+    parameters: A,
+    settings: DolphinSettings,
+    engine_type: type[ResearchBacktest[C]],
+) -> BacktestResult[A]:
     with engine_type(settings, parameters, ctx, algos) as engine:
         engine.run(np.timedelta64(parameters.batch_days, "D"))
         portfolios = records_frame(engine.get_daily_total_portfolios(), DailyPortfolio)

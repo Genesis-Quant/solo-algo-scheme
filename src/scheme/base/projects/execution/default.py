@@ -11,8 +11,11 @@ from scheme.base.internal.context import ResearchContext
 from scheme.base.internal.types import Order
 from scheme.base.projects.execution import ExecutionAlgo
 from scheme.base.projects.execution import ExecutionParams as BaseExecutionParams
+from scheme.log import get_logger
 
 __all__ = ["DefaultParams", "DirectExecution"]
+
+log = get_logger("scheme.execution")
 
 
 class DefaultParams(BaseExecutionParams):
@@ -34,3 +37,4 @@ class DirectExecution[C: ResearchContext[Any]](ExecutionAlgo[DefaultParams, C]):
         for pending in orders:
             order = pending.model_copy(update={"time": now})
             self.backtest.submit_order(order)
+        log.debug("直接提交 {} 笔订单", len(orders))

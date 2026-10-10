@@ -6,6 +6,9 @@ from scheme.execute.results import check_output, save_run
 from scheme.execute.schema import AlgoTask
 from scheme.execute.strategy import run_backtest
 from scheme.execute.strategy.assembly import Strategy, context_type
+from scheme.log import get_logger
+
+log = get_logger("scheme.task")
 
 
 def run(task: AlgoTask, *, input_sha256: str) -> int:
@@ -17,6 +20,7 @@ def run(task: AlgoTask, *, input_sha256: str) -> int:
         component = getattr(task.algos, name)
         if component:
             algos[name] = load_component(component, Algo)
+            log.info("加载 {}：{} {}（{}）", name, component.package, component.version, component.entry)
     context = (
         load_entry(distribution(task.algos.model.package), task.context)
         if task.context

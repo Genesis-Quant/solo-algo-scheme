@@ -6,8 +6,13 @@ import json
 import sys
 from importlib import import_module
 from pathlib import Path
+from time import perf_counter
+
+from scheme.log import duration, get_logger
 
 TASK_KINDS = ("factor", "model", "optimize", "control", "execution", "strategy")
+
+log = get_logger("scheme.task")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -46,9 +51,17 @@ def main(argv: list[str] | None = None) -> int:
         for component in components:
             if component is not None and not component["wheel"].startswith("https://"):
                 component["wheel"] = str((input_file.parent / component["wheel"]).resolve())
-        return import_module(f"scheme.execute.{kind}.task").run(
+        started = perf_counter()
+        log.info("正式任务开始：{}，输入 {}", kind, input_file)
+        code = import_module(f"scheme.execute.{kind}.task").run(
             data, input_sha256=hashlib.sha256(source).hexdigest()
         )
+        log.info("正式任务完成：{}，用时 {}", kind, duration(perf_counter() - started))
+        return code
     except Exception as error:
-        print(f"{type(error).__name__}: {error}", file=sys.stderr)
+        if arguments.command == "run":
+            # 正式任务的错误连同 traceback 进入调度日志；parameters 的 stderr 仍是单行错误协议。
+            log.opt(exception=error).error("正式任务失败：{}: {}", type(error).__name__, error)
+        else:
+            print(f"{type(error).__name__}: {error}", file=sys.stderr)
         return 1

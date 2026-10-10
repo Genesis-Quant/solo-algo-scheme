@@ -16,6 +16,7 @@ from scheme.base import (
     ResearchContext,
     StrategyAnalysisParams,
 )
+from scheme.log import get_logger
 
 if TYPE_CHECKING:
     from scheme.config import DolphinSettings
@@ -30,6 +31,8 @@ BASES = {
 }
 
 __all__ = ["algo_options"]
+
+log = get_logger("scheme.research")
 
 
 def algo_options(kind: str) -> dict[str, str]:
@@ -104,6 +107,10 @@ def run_research[A: BaseModel, P: BaseModel, C: ResearchContext[Any]](
     }
     for downstream in list(BASES)[list(BASES).index(kind) + 1:]:
         components[downstream] = defaults[downstream][getattr(params, downstream)]
+    log.debug(
+        "{} 研究组件：{}", kind,
+        "；".join(f"{name} {cls.__module__}:{cls.__name__}" for name, cls in components.items()),
+    )
     context = ctx if ctx is not None else context_type(components["model"])()
     backtest = StrategyAnalysisParams.model_validate(dict(params))
     algos = tuple(cls(project_parameters(parameter_type(cls), params)) for cls in components.values())
