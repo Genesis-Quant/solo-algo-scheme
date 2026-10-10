@@ -1,10 +1,21 @@
 """UI 表单只负责把简化输入转换成具体分析参数。"""
 
 from abc import ABC, abstractmethod
+from collections.abc import Collection, Sequence
 from copy import deepcopy
 from datetime import date, timedelta
 from functools import cache
-from typing import Any, ClassVar, Literal, TypeVar, cast
+from typing import (
+    Annotated,
+    Any,
+    ClassVar,
+    Literal,
+    TypeAliasType,
+    TypeVar,
+    cast,
+    get_args,
+    get_origin,
+)
 
 from pydantic import (
     AfterValidator,
@@ -54,18 +65,18 @@ def _field_owner(model: type[BaseModel], name: str) -> type | None:
     )
 
 
-def _check_aliases(model: type[BaseModel]) -> None:
+def _check_aliases(model: type[BaseModel], passed: Collection[str] | None = None) -> None:
+    """平铺输入键必须唯一；只有表单实际传入的字段需要平铺键。"""
     owners: dict[str, str] = {}
     for name, field in model.model_fields.items():
-        _input_key(model, name)
+        if passed is None or name in passed:
+            _input_key(model, name)
         aliases = field.validation_alias
         choices = aliases.choices if isinstance(aliases, AliasChoices) else [aliases]
         keys = set()
         if model.model_config.get("validate_by_alias") is not False:
-            keys.update(
-                alias.path[0] if isinstance(alias, AliasPath) else alias
-                for alias in choices if alias is not None
-            )
+            # AliasPath 读取另一个输入的嵌套值，沿用分析参数自身语义，不占用平铺键。
+            keys.update(alias for alias in choices if isinstance(alias, str))
         if not keys or model.model_config.get("validate_by_name"):
             keys.add(name)
         for key in keys:
@@ -77,20 +88,47 @@ def _check_aliases(model: type[BaseModel]) -> None:
             owners[key] = name
 
 
-def _input_field(model: type[BaseModel], name: str):
-    copied = deepcopy(model.model_fields[name])
-    validators = {
-        "before": BeforeValidator, "after": AfterValidator,
-        "plain": PlainValidator, "wrap": WrapValidator,
-    }
-    for decorator in model.__pydantic_decorators__.field_validators.values():
+_VALIDATORS = {
+    "before": BeforeValidator, "after": AfterValidator,
+    "plain": PlainValidator, "wrap": WrapValidator,
+}
+
+
+def _converts(annotation: Any, metadata: Sequence[Any] = (), seen: frozenset[int] = frozenset()) -> bool:
+    """Annotated 转换器和嵌套模型都会在最终 Analysis 中再执行一次。"""
+    if any(isinstance(item, tuple(_VALIDATORS.values())) for item in metadata):
+        return True
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return True
+    if id(annotation) in seen:
+        return False
+    seen |= {id(annotation)}
+    if isinstance(annotation, TypeAliasType):
+        return _converts(annotation.__value__, (), seen)
+    origin, args = get_origin(annotation), get_args(annotation)
+    if origin is Annotated:
+        return _converts(args[0], args[1:], seen)
+    if isinstance(origin, TypeAliasType) and _converts(origin, (), seen):
+        return True
+    return any(_converts(arg, (), seen) for arg in args)
+
+
+def _input_field(model: type[BaseModel], name: str, *, platform: bool):
+    field = model.model_fields[name]
+    copied = deepcopy(field)
+    decorators = [
+        decorator for decorator in model.__pydantic_decorators__.field_validators.values()
+        if name in decorator.info.fields or "*" in decorator.info.fields
+    ]
+    if platform and not decorators and not _converts(field.annotation, field.metadata):
+        # 只改默认值、标题或约束的平台字段仍由表单校验，交给下游的公共值保持规范。
+        return copied
+    for decorator in decorators:
         info = decorator.info
-        if name not in info.fields and "*" not in info.fields:
-            continue
         options = {} if info.mode == "after" else {
             "json_schema_input_type": info.json_schema_input_type,
         }
-        copied.metadata.append(validators[info.mode](decorator.func, **options))
+        copied.metadata.append(_VALIDATORS[info.mode](decorator.func, **options))
     # 保留约束与输入 schema；业务转换只交给最终 Analysis，不能在 Form 先转换一次。
     copied.metadata.append(SkipValidation())
     return copied
@@ -102,6 +140,8 @@ class ResearchForm[P: BaseModel](ReportForm[P]):
     _analysis_base: ClassVar[type[BaseModel] | None] = None
     _analysis_model: ClassVar[type[BaseModel] | None] = None
     _internal_fields: ClassVar[frozenset[str]] = frozenset({"universe", "config", "symbols"})
+    _supplied_fields: ClassVar[frozenset[str]] = frozenset({"universe"})
+    _stage_fields: ClassVar[frozenset[str]] = frozenset()
 
     start: date = Field(default=date(2020, 1, 1), title="开始日期")
     end: date = Field(default=date(2027, 1, 1), title="结束日期（不含）")
@@ -129,7 +169,8 @@ class ResearchForm[P: BaseModel](ReportForm[P]):
         if target.__pydantic_generic_metadata__.get("parameters"):
             raise TypeError(f"{cls.__name__} 必须绑定具体分析参数类型，不能保留未绑定泛型")
 
-        _check_aliases(target)
+        base = cls._analysis_base
+        _check_aliases(target, target.model_fields.keys() - (cls._internal_fields - cls._supplied_fields))
         fields = {}
         for name, field in target.model_fields.items():
             if field.default_factory_takes_validated_data:
@@ -137,14 +178,21 @@ class ResearchForm[P: BaseModel](ReportForm[P]):
                     f"自动 Form 字段 {name!r} 不支持依赖其他字段的 default_factory；"
                     "请使用无参默认工厂，或在分析参数的 model_validator 中推导"
                 )
-            if name not in cls._analysis_base.model_fields:
-                if name in cls.model_fields or name in cls._internal_fields or hasattr(cls, name):
-                    raise TypeError(f"分析字段 {name!r} 与 Scheme 表单保留字段冲突")
+            inherited = _field_owner(target, name) is _field_owner(base, name)
+            if name in cls._stage_fields and not (name in base.model_fields and inherited):
+                raise TypeError(f"{name!r} 是 Scheme 管理的上下游选择字段，项目参数不能声明同名字段")
+            if name not in base.model_fields and (
+                name in cls.model_fields or name in cls._internal_fields or hasattr(cls, name)
+            ):
+                raise TypeError(f"分析字段 {name!r} 与 Scheme 表单保留字段冲突")
             if name in cls._internal_fields:
+                if name not in cls._supplied_fields and field.is_required():
+                    raise TypeError(f"分析字段 {name!r} 由 Scheme 管理且不在表单中填写，必须提供默认值")
                 continue
-            inherited = _field_owner(target, name) is _field_owner(cls._analysis_base, name)
             if name not in cls.model_fields or not inherited:
-                fields[name] = (field.annotation, _input_field(target, name))
+                fields[name] = (
+                    field.annotation, _input_field(target, name, platform=name in cls.model_fields),
+                )
 
         parent = super().__class_getitem__(target)
         generated = create_model(
@@ -191,6 +239,9 @@ class ResearchForm[P: BaseModel](ReportForm[P]):
 
 class BacktestForm[P: BaseModel](ResearchForm[P]):
     """四类策略环节共享的行情、资金和费率输入。"""
+
+    _supplied_fields: ClassVar[frozenset[str]] = frozenset({"universe", "config"})
+    _stage_fields: ClassVar[frozenset[str]] = frozenset({"model", "optimize", "control", "execution"})
 
     market_data: Literal["stock_daily", "stock_snapshot"] = Field(
         default="stock_daily", title="行情类型",

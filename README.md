@@ -79,10 +79,12 @@ Factor 的项目输出列可以在项目 AnalysisParams 中声明一次，例如
 
 - Form 保留既有 UI 默认：日期 `2020-01-01` 至 `2027-01-01`（不含结束日），股票池沪深 300；运行参数的日期仍必填。
 - 基础分析字段未被项目覆盖时沿用 Scheme 的 UI 默认；项目显式重新声明的字段保留项目约束和默认。Factor 表单的市值加权默认不会被 Analysis 的等权默认意外覆盖。
-- 算法的 Pydantic decorator validators 在 `build()` 构造具体 AnalysisParams 时执行，不要求表单提前具备 `universe/config`；`build()` 不会调用 `run()`。从项目 AnalysisParams 自动带出的字段保留原始输入和 Schema，将转换、约束及模型校验统一推迟到 `build()`，避免转换两次或绕过算法的 strict/字符串规范化配置。不能把单独构造 Form 当作完整研究参数已经校验通过。
+- 算法的 Pydantic decorator validators 在 `build()` 构造具体 AnalysisParams 时执行，不要求表单提前具备 `universe/config`；`build()` 不会调用 `run()`。项目新增的业务字段保留原始输入和 Schema，将转换、约束及模型校验统一推迟到 `build()`，避免转换两次或绕过算法的 strict/字符串规范化配置。不能把单独构造 Form 当作完整研究参数已经校验通过。
+- 项目在 AnalysisParams 中重新声明的平台字段（如 `start`、`benchmark`、`columns`）若只修改默认值、标题或约束，仍由表单校验并规范化，传给下游环节的公共值保持规范；带 Annotated 转换器、字段 validator 或嵌套模型时，与业务字段一样推迟到 `build()` 只执行一次。
 - 自动表单支持无参 `default_factory`；依赖其他已校验字段的默认工厂无法独立生成 UI 默认值，会在绑定时明确拒绝。字段间推导请放到 AnalysisParams 的 `model_validator`，或继续使用自定义 `ReportForm`。
-- `universe/config/symbols` 不直接暴露为 UI 输入。自定义股票池或引擎配置可以直接构造 AnalysisParams；策略 AnalysisParams 的额外 `config` 默认项会保留，资金和费率由表单输入决定。
-- `pool/lookback/cash/commission/tax` 等表单转换字段及表单方法名不能再作为另一个含义的算法字段；冲突明确报错，不静默覆盖。validation alias 保持唯一；不能表示为扁平输入的纯 `AliasPath` 明确拒绝。
+- `universe/config/symbols` 不直接暴露为 UI 输入。自定义股票池或引擎配置可以直接构造 AnalysisParams；策略 AnalysisParams 的额外 `config` 默认项会保留，资金和费率由表单输入决定。表单不提供的内部字段（如 `symbols`）在项目中重新声明时必须有默认值，否则绑定表单时报错。
+- `pool/lookback/cash/commission/tax` 等表单转换字段及表单方法名不能再作为另一个含义的算法字段；冲突明确报错，不静默覆盖。四类策略环节中，`model/optimize/control/execution` 是 Scheme 管理的上下游选择字段，项目参数不能声明同名字段。
+- validation alias 的平铺输入键保持唯一。`AliasChoices` 中的 `AliasPath` 备用别名按分析参数自身语义读取嵌套值，不占用平铺键；只有纯 `AliasPath`、没有字符串别名的输入字段无法表示为扁平表单，会明确拒绝。
 - 旧的 `ReportForm[具体AnalysisParams]` 加手写 `build()` 仍受支持，未参数化的 Scheme 公共 Form 仍可直接使用。
 
 这种写法依赖 Scheme 1.3 的公共泛型表单，Algo 模板 1.3.x 因此声明 `scheme>=1.3.0,<1.4.0`。1.2.x 项目继续使用各自锁定的 Scheme 和手写 Form，不会被自动迁移。
@@ -110,6 +112,14 @@ algos.model 指向冻结的候选包，backtest 保存表单构建后的参数�
 Worker 使用锁文件中的 Scheme 默认实现；显式指定的下游包优先于默认实现。
 
 Algo 包与 Scheme 的主版本、次版本必须一致，补丁版本可独立迭代。包声明整个主次版本系列，例如 `scheme>=1.2.0,<1.3.0`，因此 Scheme 1.2.0 与 1.2.7 均可用于 1.2.x 项目，不允许与 1.1.x 或 1.3.x 混用。下界必须为该系列的补丁 0，上界必须为下一次版本的补丁 0；不接受补丁版本下界、精确版本、直接 Git/URL、条件依赖或跨次版本范围。模板选择、上游项目安装、策略组装和正式 wheel 校验使用同一兼容边界。项目和正式任务仍使用 uv source 与锁文件精确固定实际版本，兼容不等于自动升级或放宽锁文件、wheel 身份校验。其他共享依赖仍须可共同解析。
+
+### 1.3.1 公共表单字段归属与别名检查修复
+
+- 策略类项目的参数不能再声明 `model/optimize/control/execution`。此前同名参数会悄悄替换上下游选择字段，保存版本时把参数值当成上游入口。表单不提供的内部字段（如 `symbols`）被重新声明为必填时，绑定表单即明确报错，不再在每次 `build()` 时失败。
+- `AliasChoices("days", AliasPath("config", "window"))` 这类备用嵌套别名对分析参数合法，不再被误判为与 `config` 字段冲突。
+- 项目重新声明的平台字段只修改默认值、标题或约束时，由表单校验并规范化；传给下游环节的公共值不再保留原始字符串，也不再产生序列化警告。
+
+新建项目选择 Scheme v1.3.1 后生效，Algo 模板 1.3.0 不需要更新；已有项目继续使用各自锁定的版本。
 
 ### 1.3.0 公共研究表单与 URL 报告展示
 

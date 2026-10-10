@@ -38,6 +38,7 @@ from scheme.base import (
     ModelParams,
     ModelReportForm,
     OptimizeAnalysisParams,
+    OptimizeParams,
     OptimizeReportForm,
     ReportForm,
 )
@@ -372,9 +373,7 @@ def test_nested_model_validation_does_not_repeat_or_mutate_the_form():
         ModelReportForm[Analysis](options={"count": "bad"}).build()
 
 
-@pytest.mark.parametrize("alias", [
-    AliasChoices("days", "cash"), AliasChoices("days", AliasPath("cash", 0)),
-])
+@pytest.mark.parametrize("alias", [AliasChoices("days", "cash"), AliasChoices("days", "pool")])
 def test_secondary_aliases_cannot_capture_platform_values(alias):
     class Analysis(ModelAnalysisParams):
         window: int = Field(default=20, validation_alias=alias)
@@ -436,6 +435,83 @@ def test_partial_generic_analysis_must_be_bound_before_generating_form():
         with pytest.raises(TypeError, match="未绑定泛型"):
             ModelReportForm[target]
     assert ModelReportForm[Analysis[int]](window="3").build().window == 3
+
+
+def test_runtime_parameter_cannot_replace_upstream_selector():
+    class RegressionParams(OptimizeParams):
+        model: str = Field(default="ridge", title="回归模型")
+
+    class RegressionAnalysis(RegressionParams, OptimizeAnalysisParams):
+        pass
+
+    with pytest.raises(TypeError, match="'model'.*上下游选择字段"):
+        OptimizeReportForm[RegressionAnalysis]
+
+
+@pytest.mark.parametrize("base,analysis,name,spec", [
+    (ModelReportForm, ModelAnalysisParams, "optimize", (int, 3)),
+    (ModelReportForm, ModelAnalysisParams, "model", (str, "ridge")),
+    (ExecutionReportForm, ExecutionAnalysisParams, "control", (str, Field(
+        min_length=1, validation_alias="selected_control",
+        json_schema_extra={"x-algo-kind": "control"},
+    ))),
+])
+def test_stage_selector_names_are_reserved_for_strategy_projects(base, analysis, name, spec):
+    target = create_model("SelectorAnalysis", __base__=analysis, **{name: spec})
+    with pytest.raises(TypeError, match=f"'{name}'.*上下游选择字段"):
+        base[target]
+
+
+def test_factor_projects_may_use_stage_names():
+    target = create_model("NamedFactorAnalysis", __base__=FactorAnalysisParams, model=(str, "ridge"))
+    assert FactorReportForm[target](columns=["f"]).build().model == "ridge"
+
+
+def test_internal_fields_without_form_input_need_defaults():
+    symbols = create_model("RequiredSymbols", __base__=ModelAnalysisParams, symbols=(list[str], ...))
+    with pytest.raises(TypeError, match="'symbols'.*必须提供默认值"):
+        ModelReportForm[symbols]
+    config = create_model("RequiredConfig", __base__=ModelAnalysisParams, config=(dict[str, float], ...))
+    assert ModelReportForm[config](cash=10_000).build().config == {
+        "cash": 10_000, "commission": 0.0003, "tax": 0.0005,
+    }
+
+
+def test_nested_alias_paths_follow_analysis_semantics():
+    class Analysis(ModelAnalysisParams):
+        window: int = Field(default=20, validation_alias=AliasChoices("days", AliasPath("config", "window")))
+        symbols: list[str] | None = Field(default=None, validation_alias=AliasPath("legacy", "symbols"))
+
+    assert Analysis(start="2025-01-01", end="2025-01-03", days=5).window == 5
+    form_type = ModelReportForm[Analysis]
+    _, wire = _form_schema(form_type)
+    assert wire["window"] == "days"
+    assert "symbols" not in form_type.model_fields
+    built = form_type(days=5).build()
+    assert (built.window, built.symbols) == (5, None)
+
+
+def test_redeclared_platform_fields_are_validated_by_form():
+    calls = []
+
+    def shift(value):
+        calls.append(value)
+        return value.replace(day=2)
+
+    class Analysis(ModelAnalysisParams):
+        start: date = Field(default=date(2022, 1, 1), title="开始日期")
+        batch_days: int = Field(default=2, ge=2, title="行情加载批次天数")
+        end: Annotated[date, AfterValidator(shift)] = date(2023, 1, 1)
+
+    form_type = ModelReportForm[Analysis]
+    assert defaults(form_type)["batch_days"] == 2
+    form = form_type(start="2022-01-01T00:00:00", batch_days="3", end="2023-01-01")
+    assert (form.start, form.batch_days, form.end) == (date(2022, 1, 1), 3, "2023-01-01")
+    with pytest.raises(ValidationError, match="batch_days"):
+        form_type(batch_days=1)
+    built = form.build()
+    assert (built.start, built.end, built.batch_days) == (date(2022, 1, 1), date(2023, 1, 2), 3)
+    assert calls == [date(2023, 1, 1)]
 
 
 def test_real_cli_and_factor_freeze_keep_the_existing_wire_contract(tmp_path, monkeypatch, capsys):
