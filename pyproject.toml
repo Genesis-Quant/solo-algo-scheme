@@ -13,7 +13,7 @@ dependencies = [
     "packaging>=24",
     "loguru>=0.7,<0.8",
     "tushare>=1.4.29,<2",
-    "backtest @ git+https://gitee.com/genesis-quant/backtest@2337db10c16d927842c6497f3b74b9561dd4dcda",
+    "backtest @ git+https://gitee.com/genesis-quant/backtest@811346a5e9b17efd4dce95f803717ca4f5572d9c",
     "arena-runtime @ git+https://gitee.com/genesis-quant/arena-runtime@eeebfe417aa999fa1e386cbd62b74326a5dab66c",
 ]
 

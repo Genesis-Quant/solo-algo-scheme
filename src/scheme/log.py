@@ -1,6 +1,6 @@
 """研究进程的统一日志：Scheme、backtest 库、研究项目与 Arena 输出同一格式。
 
-默认 INFO 只显示研究进度、结果和异常；Arena 每次查询的会话与建表步骤归入 DEBUG。
+默认 INFO 只显示研究进度、结果和异常；Arena 每次查询的会话与建表步骤只在 DEBUG 级别显示。
 环境变量 SCHEME_LOG_LEVEL 或 configure(level=...) 可切换为 DEBUG、WARNING 等级别。
 研究项目可直接使用标准库 logging.getLogger(__name__)，输出会接入这里的格式与级别；
 其他第三方库的标准库日志只显示 WARNING 及以上。
