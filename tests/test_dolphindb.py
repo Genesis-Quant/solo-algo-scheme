@@ -79,6 +79,73 @@ class SyntheticBacktest(ResearchBacktest[State]):
         return DosVar("soloMessages")
 
 
+class CrossMonthBacktest(ResearchBacktest[State]):
+    def load_messages(self, start: np.datetime64, end: np.datetime64) -> DosVar:
+        frame = pd.DataFrame({
+            "time": pd.to_datetime(["2025-01-30", "2025-01-31", "2025-02-03"]),
+            "code": ["000001.XSHE"] * 3,
+            "open": [10.0, 10.0, 10.0], "close": [11.0, 12.0, 13.0],
+            "pre_close": [10.0, 11.0, 12.0], "up_limit": [20.0] * 3, "down_limit": [1.0] * 3,
+        })
+        frame = frame[(frame.time >= start) & (frame.time < end)]
+        if frame.empty:
+            self.session.run("soloMessages = table(array(TIMESTAMP,0) as timestamp)")
+            return DosVar("soloMessages")
+        self.session.upload({"soloDaily": frame})
+        self.session.run("soloMessages = soloDailyMessages(soloDaily)")
+        return DosVar("soloMessages")
+
+
+def test_real_month_report_reads_only_one_portfolio_and_normalizes_costs():
+    from io import StringIO
+
+    from scheme.log import configure
+
+    stream = StringIO()
+    reads = []
+
+    class Bounded(CrossMonthBacktest):
+        def get_records(self, query, model):
+            result = super().get_records(query, model)
+            if query.startswith("select top 1"):
+                reads.append(result)
+            return result
+
+    try:
+        configure("INFO", stream=stream)
+        result = run_backtest(
+            [Buy(Params())], State(),
+            StrategyAnalysisParams(
+                start="2025-01-30", end="2025-02-04", symbols=["000001.XSHE"],
+                config={"cash": "100000", "commission": "0", "tax": "0"},
+            ),
+            settings=DolphinSettings.from_env(), engine_type=Bounded,
+        )
+        assert len(reads) == 1 and len(reads[0]) == 1
+        last_january = result.daily_portfolios[result.daily_portfolios.tradeDate == date(2025, 1, 31)].iloc[0]
+        assert reads[0][0].tradeDate == date(2025, 1, 31)
+        assert reads[0][0].netValue == pytest.approx(last_january.netValue)
+        assert "2025-01 完成：" in stream.getvalue()
+        assert "持仓 1 只" in stream.getvalue()
+
+        reads.clear()
+        stream.truncate(0)
+        stream.seek(0)
+        configure("WARNING", stream=stream)
+        run_backtest(
+            [Buy(Params())], State(),
+            StrategyAnalysisParams(
+                start="2025-01-30", end="2025-02-04", symbols=["000001.XSHE"],
+                config={"cash": 100000, "commission": 0, "tax": 0},
+            ),
+            settings=DolphinSettings.from_env(), engine_type=Bounded,
+        )
+        assert reads == []
+        assert stream.getvalue() == ""
+    finally:
+        configure("INFO")
+
+
 def test_real_direct_order_and_parquet(tmp_path):
     ctx = State()
     result = run_backtest(

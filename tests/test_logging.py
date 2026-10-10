@@ -16,9 +16,12 @@ import pandas as pd
 import pytest
 from backtest import Direction, OrderStatus
 from loguru import logger
+from pydantic import BaseModel
 
 import scheme.log as scheme_log
-from scheme.execute.strategy.api import _summarize
+from scheme import Algo, ResearchContext, StrategyAnalysisParams
+from scheme.config import DolphinSettings
+from scheme.execute.strategy.api import ResearchBacktest, _costs, _summarize, run_backtest
 from scheme.execute.strategy.engine import Backtest
 
 ARENA_LINE = re.compile(
@@ -31,10 +34,19 @@ ARENA_LINE = re.compile(
 def output(monkeypatch):
     stream = StringIO()
     monkeypatch.delenv(scheme_log.LEVEL_VARIABLE, raising=False)
-    yield stream
-    scheme_log.mark_simulation(None)
-    scheme_log._current = None
-    scheme_log.configure(stream=sys.stderr)
+    root = logging.getLogger()
+    handlers, level = root.handlers[:], root.level
+    # 测试显式安装桥接，不让 configure 以替换 pytest 的宿主 Handler 来满足断言。
+    root.handlers = [scheme_log._Intercept()]
+    root.setLevel(logging.DEBUG)
+    try:
+        yield stream
+    finally:
+        scheme_log.mark_simulation(None)
+        scheme_log._current = None
+        scheme_log.configure(stream=sys.stderr)
+        root.handlers = handlers
+        root.setLevel(level)
 
 
 def records(output):
@@ -156,10 +168,19 @@ def test_month_report_uses_previous_month_end(output):
         SimpleNamespace(tradeDate=date(2023, 1, 31), netValue=1.05, cash=1050.0, totalEquity=1.05e5),
         SimpleNamespace(tradeDate=date(2023, 2, 1), netValue=9.99, cash=0.0, totalEquity=1.0),
     ]
-    engine.get_daily_total_portfolios = lambda: portfolios
+    queries = []
+    uploaded = {}
+    engine.session = SimpleNamespace(upload=lambda values: uploaded.update(values))
+
+    def get_records(query, model):
+        queries.append(query)
+        eligible = [row for row in portfolios if np.datetime64(row.tradeDate) < uploaded["soloProgressDate"]]
+        return sorted(eligible, key=lambda row: row.tradeDate, reverse=True)[:1]
+
+    engine.get_records = get_records
     engine.get_position = lambda: {
-        "600000.XSHG": SimpleNamespace(longPosition=100),
-        "000001.XSHE": SimpleNamespace(longPosition=0),
+        "600000.XSHG": SimpleNamespace(longPosition=100, shortPosition=0),
+        "000001.XSHE": SimpleNamespace(longPosition=0, shortPosition=0),
     }
     engine.report_month(pd.Timestamp("2023-01-03 09:30"))
     engine.progress.orders, engine.progress.trades, engine.progress.rejected = 5, 4, 1
@@ -170,6 +191,65 @@ def test_month_report_uses_previous_month_end(output):
         records(output)[0][-1]
     )
     assert (engine.progress.orders, engine.progress.rejected) == (0, 0)
+    assert queries == [
+        "select top 1 * from getDailyTotalPortfolios(engine) "
+        "where tradeDate < soloProgressDate order by tradeDate desc"
+    ]
+    assert uploaded["soloProgressDate"] == np.datetime64("2023-02-01", "D")
+
+
+def test_month_report_skips_queries_when_info_is_hidden(output):
+    scheme_log.configure("WARNING", stream=output)
+    engine = object.__new__(Offline)
+    engine.report_month(pd.Timestamp("2023-01-03 09:30"))
+    engine.progress.orders, engine.progress.trades, engine.progress.rejected = 5, 4, 1
+    # 此对象没有会话；日志不可见时不应调用任何账户或持仓查询。
+    engine.report_month(pd.Timestamp("2023-02-01 09:30"))
+    assert output.getvalue() == ""
+    assert engine.progress.month == pd.Period("2023-02", "M")
+    assert (engine.progress.orders, engine.progress.trades, engine.progress.rejected) == (0, 0, 0)
+    assert engine.progress.net_value is None
+
+
+def test_month_report_does_not_report_false_return_after_hidden_month(output):
+    scheme_log.configure("WARNING", stream=output)
+    engine = object.__new__(Offline)
+    engine.report_month(pd.Timestamp("2023-01-03"))
+    engine.report_month(pd.Timestamp("2023-02-01"))
+    assert engine.progress.net_value is None
+    engine.config = {
+        "startDate": np.datetime64("2023-01-01", "D"), "endDate": np.datetime64("2023-12-31", "D"),
+    }
+    engine.session = SimpleNamespace(upload=lambda _: None)
+    engine.get_records = lambda query, model: [
+        SimpleNamespace(tradeDate=date(2023, 2, 28), netValue=0.9, cash=100.0, totalEquity=1000.0),
+    ]
+    engine.get_position = lambda: {}
+    scheme_log.configure("INFO", stream=output)
+    engine.report_month(pd.Timestamp("2023-03-01"))
+    assert "本月 不可用" in records(output)[0][-1]
+    assert engine.progress.net_value == 0.9
+
+
+def test_month_report_counts_long_and_short_positions(output):
+    scheme_log.configure(stream=output)
+    engine = object.__new__(Offline)
+    engine.config = {
+        "startDate": np.datetime64("2023-01-01", "D"), "endDate": np.datetime64("2023-12-31", "D"),
+    }
+    engine.session = SimpleNamespace(upload=lambda _: None)
+    engine.get_records = lambda query, model: [
+        SimpleNamespace(tradeDate=date(2023, 1, 31), netValue=0.95, cash=100.0, totalEquity=1000.0),
+    ]
+    engine.get_position = lambda: {
+        "long": SimpleNamespace(longPosition=100, shortPosition=0),
+        "short": SimpleNamespace(longPosition=0, shortPosition=100),
+        "both": SimpleNamespace(longPosition=100, shortPosition=100),
+        "flat": SimpleNamespace(longPosition=0, shortPosition=0),
+    }
+    engine.report_month(pd.Timestamp("2023-01-03"))
+    engine.report_month(pd.Timestamp("2023-02-01"))
+    assert "持仓 3 只" in records(output)[0][-1]
 
 
 def test_summary_reports_returns_orders_and_rejections(output):
@@ -196,6 +276,78 @@ def test_summary_reports_returns_orders_and_rejections(output):
     )
     assert rejections[1] == "WARNING"
     assert rejections[-1] == "拒单 3 笔（买入 2，卖出 1）：插件未返回原因，DEBUG 日志含逐笔明细"
+
+
+@pytest.mark.parametrize("values, drawdown", [
+    ([0.9], "10.00%"),
+    ([0.9, 0.95], "10.00%"),
+    ([1.1, 0.99], "10.00%"),
+    ([0.95, 0.8], "20.00%"),
+    ([1.05, 1.1], "0.00%"),
+])
+def test_summary_includes_initial_net_value(output, values, drawdown):
+    scheme_log.configure(stream=output)
+    portfolios = pd.DataFrame({
+        "tradeDate": pd.date_range("2023-01-03", periods=len(values)).date,
+        "netValue": values, "totalFee": 0.0,
+    })
+    details = pd.DataFrame(columns=["orderId", "orderStatus", "direction", "orderInfo"])
+    _summarize(SimpleNamespace(daily_portfolios=portfolios, trade_details=details), 1)
+    assert f"最大回撤 {drawdown}" in records(output)[0][-1]
+
+
+class Params(BaseModel):
+    pass
+
+
+class State(ResearchContext[float]):
+    pass
+
+
+class Probe(Algo[Params, State]):
+    pass
+
+
+class NoMarket(ResearchBacktest[State]):
+    def __init__(self, settings, parameters, ctx, algos):
+        self.config = _costs(parameters.config)
+
+    def run(self, batch):
+        pass
+
+    def close(self):
+        pass
+
+    def get_daily_total_portfolios(self):
+        return []
+
+    def get_trade_details(self):
+        return []
+
+    def get_daily_position(self):
+        return []
+
+    def get_daily_trading_statistics(self):
+        return []
+
+
+@pytest.mark.parametrize("level", ["INFO", "DEBUG", "WARNING"])
+def test_numeric_string_costs_do_not_fail_before_engine_creation(output, level):
+    scheme_log.configure(level, stream=output)
+    config = {"cash": "100000", "commission": "0.0003", "tax": "0.0005"}
+    params = StrategyAnalysisParams(
+        start="2023-01-03", end="2023-01-05", symbols=["000001.XSHE"], config=config,
+    )
+    result = run_backtest(
+        [Probe(Params())], State(), params, settings=DolphinSettings.model_construct(),
+        engine_type=NoMarket,
+    )
+    assert result.daily_portfolios.empty
+    assert params.config == config
+    if level in {"INFO", "DEBUG"}:
+        assert "资金 100,000，佣金 0.0300%，印花税 0.0500%" in output.getvalue()
+    assert _costs(config) == {"cash": 100000.0, "commission": 0.0003, "tax": 0.0005}
+    assert _costs({}) == {"cash": 1_000_000.0, "commission": 0.0003, "tax": 0.0005}
 
 
 def test_existing_frontend_parser_reads_logs_without_format_changes(output):

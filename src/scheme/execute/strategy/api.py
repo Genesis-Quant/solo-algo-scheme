@@ -32,6 +32,11 @@ from .result import BacktestResult
 log = get_logger("scheme.backtest")
 
 
+def _costs(config: dict[str, Any]) -> dict[str, float]:
+    defaults = {"cash": 1_000_000.0, "commission": 0.0003, "tax": 0.0005}
+    return {key: float(config.get(key, value)) for key, value in defaults.items()}
+
+
 class ResearchBacktest[C: BaseModel](Backtest[C]):
     def __init__(
         self,
@@ -44,12 +49,10 @@ class ResearchBacktest[C: BaseModel](Backtest[C]):
         self.parameters = parameters
         config = {
             "strategyGroup": "stock",
-            "cash": 1_000_000.0,
-            "commission": 0.0003,
-            "tax": 0.0005,
             "latency": np.int32(0),
             "enableSellCloseRestrict": True,
             **parameters.config,
+            **_costs(parameters.config),
             "startDate": parameters.start,
             "endDate": parameters.end - timedelta(days=1),
             "dataType": np.int32(1),
@@ -64,8 +67,6 @@ class ResearchBacktest[C: BaseModel](Backtest[C]):
         for key, value in config.items():
             if type(value) is int and key not in {"cash", "commission", "tax"}:
                 config[key] = np.int32(value)
-        for key in ("cash", "commission", "tax"):
-            config[key] = float(config[key])
         super().__init__(
             settings.host,
             settings.port,
@@ -174,7 +175,7 @@ def run_backtest[C: ResearchContext[Any], A: StrategyAnalysisParams](
         if not isinstance(algo, Algo):
             raise TypeError("算法必须继承当前 scheme 的 Algo")
         validate_context(algo, ctx)
-    config = {"cash": 1_000_000.0, "commission": 0.0003, "tax": 0.0005, **parameters.config}
+    config = _costs(parameters.config)
     log.info(
         "回测开始：{} 至 {}（不含），{}，每批 {} 天；资金 {:,.0f}，佣金 {:.4%}，印花税 {:.4%}，基准 {}；"
         "算法 {}",
@@ -202,7 +203,7 @@ def _summarize(result: BacktestResult[Any], seconds: float) -> None:
         log.warning("回测没有生成账户记录，用时 {}", duration(seconds))
         return
     net_value = portfolios.netValue
-    drawdown = (1 - net_value / net_value.cummax()).max()
+    drawdown = (1 - net_value / net_value.cummax().clip(lower=1.0)).max()
     benchmark = (
         f"{portfolios.benchmarkNetValue.iloc[-1] - 1:+.2%}"
         if "benchmarkNetValue" in portfolios else "无"

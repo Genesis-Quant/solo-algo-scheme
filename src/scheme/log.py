@@ -12,7 +12,7 @@ from loguru import logger
 if TYPE_CHECKING:
     from loguru import Logger, Record
 
-__all__ = ["configure", "get_logger"]
+__all__ = ["configure", "get_logger", "is_enabled"]
 
 LEVEL_VARIABLE = "SCHEME_LOG_LEVEL"
 _DETAIL_SOURCES = ("runtime.apps.query", "runtime.database.session")
@@ -23,6 +23,8 @@ _RESEARCH_SOURCES = re.compile(
 _ALIASES = {"WARN": "WARNING", "FATAL": "CRITICAL"}
 _simulation: ContextVar[str] = ContextVar("scheme_log_simulation", default="")
 _current: tuple[str, TextIO] | None = None
+_threshold = logger.level("INFO").no
+_intercept: logging.Handler | None = None
 
 
 class _Intercept(logging.Handler):
@@ -68,6 +70,12 @@ def _accept(threshold: int):
     return accept
 
 
+def is_enabled(level: str) -> bool:
+    """按当前 Scheme 阈值判断级别，避免为不会输出的日志准备数据。"""
+    name = level.strip().upper()
+    return logger.level(_ALIASES.get(name, name)).no >= _threshold
+
+
 def configure(level: str | None = None, *, stream: TextIO | None = None) -> None:
     """沿用 Arena 的文件、函数和行号格式；默认 INFO，可通过 SCHEME_LOG_LEVEL 调整。"""
     # Arena 导入时设置 loguru，必须先完成导入，再接管级别和输出流。
@@ -88,7 +96,8 @@ def configure(level: str | None = None, *, stream: TextIO | None = None) -> None
     # stdout 留给 CLI JSON；Notebook 写 stdout，避免正常研究日志被显示为错误流。
     in_kernel = type(sys.stdout).__module__.startswith("ipykernel")
     target = stream or (sys.stdout if in_kernel else sys.stderr)
-    global _current
+    global _current, _threshold, _intercept
+    _threshold = threshold
     if _current != (name, target):
         logger.remove()
         logger.configure(patcher=_patch)
@@ -96,12 +105,16 @@ def configure(level: str | None = None, *, stream: TextIO | None = None) -> None
             target, level=threshold, format=log_format, filter=_accept(threshold),
             colorize=None, backtrace=False, diagnose=False,
         )
-        standard = logging.getLevelName(name)
-        logging.basicConfig(
-            handlers=[_Intercept()], level=standard if isinstance(standard, int) else threshold,
-            force=True,
-        )
         _current = (name, target)
+    standard = logging.getLevelName(name)
+    standard = standard if isinstance(standard, int) else threshold
+    root = logging.getLogger()
+    # 宿主负责已有及后加的 handlers；只安装空 root，或调整仍由 Scheme 独占的级别。
+    if not root.handlers:
+        _intercept = _Intercept()
+        logging.basicConfig(handlers=[_intercept], level=standard)
+    elif _intercept is not None and root.handlers == [_intercept]:
+        root.setLevel(standard)
     if invalid:
         get_logger("scheme").warning("{} 无效：{}，已按 INFO 输出日志", LEVEL_VARIABLE, invalid)
 

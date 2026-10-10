@@ -10,12 +10,12 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from backtest import Backtest as BaseBacktest
-from backtest import DosVar, OrderStatus
+from backtest import DailyPortfolio, DosVar, OrderStatus
 from pydantic import BaseModel
 
 from scheme.base import Algo, Order
 from scheme.data.dolphindb.symbols import engine_symbol, normalize_order
-from scheme.log import duration, get_logger, mark_simulation
+from scheme.log import duration, get_logger, is_enabled, mark_simulation
 
 __all__ = ["Backtest"]
 
@@ -28,7 +28,7 @@ class Progress:
 
     started: float = field(default_factory=perf_counter)
     month: pd.Period | None = None
-    net_value: float = 1.0
+    net_value: float | None = 1.0
     orders: int = 0
     trades: int = 0
     rejected: int = 0
@@ -64,19 +64,35 @@ class Backtest[C: BaseModel](BaseBacktest[C]):
         if progress.month is None or month == progress.month:
             progress.month = month
             return
-        today = moment.date()
-        portfolios = [row for row in self.get_daily_total_portfolios() if row.tradeDate < today]
+        if not is_enabled("INFO"):
+            progress.month = month
+            progress.net_value = None
+            progress.orders = progress.trades = progress.rejected = 0
+            return
+        self.session.upload({"soloProgressDate": np.datetime64(moment.date(), "D")})
+        portfolios = self.get_records(
+            "select top 1 * from getDailyTotalPortfolios(engine) "
+            "where tradeDate < soloProgressDate order by tradeDate desc",
+            DailyPortfolio,
+        )
         if portfolios:
-            latest = portfolios[-1]
-            positions = sum(1 for item in self.get_position().values() if item.longPosition > 0)
+            latest = portfolios[0]
+            positions = sum(
+                1 for item in self.get_position().values()
+                if item.longPosition > 0 or item.shortPosition > 0
+            )
             start = pd.Timestamp(self.config["startDate"])
             end = pd.Timestamp(self.config["endDate"] + np.timedelta64(1, "D"))
             done = min(max((moment - start) / (end - start), 1e-6), 1.0)
             elapsed = perf_counter() - progress.started
+            monthly = (
+                f"{latest.netValue / progress.net_value - 1:+.2%}"
+                if progress.net_value is not None and progress.net_value > 0 else "不可用"
+            )
             log.info(
-                "{} 完成：净值 {:.4f}（本月 {:+.2%}），持仓 {} 只，现金 {:.1%}；"
+                "{} 完成：净值 {:.4f}（本月 {}），持仓 {} 只，现金 {:.1%}；"
                 "订单 {}，成交 {}，拒单 {}；已用 {}，预计剩余 {}",
-                progress.month, latest.netValue, latest.netValue / progress.net_value - 1,
+                progress.month, latest.netValue, monthly,
                 positions, latest.cash / latest.totalEquity if latest.totalEquity else 0.0,
                 progress.orders, progress.trades, progress.rejected,
                 duration(elapsed), duration(elapsed / done * (1 - done)),
