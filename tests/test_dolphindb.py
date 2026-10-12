@@ -12,6 +12,7 @@ import pandas as pd
 import pytest
 from pydantic import BaseModel
 from runtime.apps.query import FactorQuery
+from runtime.database import CORE_TABLE
 
 from scheme import (
     Algo,
@@ -22,10 +23,13 @@ from scheme import (
     LimitOrder,
     OrderStatus,
     ResearchContext,
+    StockPool,
     TradeReport,
+    Universe,
 )
 from scheme.base import ModelAlgo, ModelParams, ModelReportForm
 from scheme.config import DolphinSettings
+from scheme.data.dolphindb.symbols import engine_symbol
 from scheme.execute.factor import FactorAnalysisParams, analyze_factors
 from scheme.execute.strategy import ResearchBacktest, StrategyAnalysisParams, run_backtest
 
@@ -379,3 +383,56 @@ def test_real_factor_query_pipeline():
     assert result.processed_data.score_group.tolist() == [0, 1, 1, 0]
     assert result.processed_data[["return_1", "return_5"]].notna().all().all()
     assert result.execution_statistics.retention_rate.tolist() == [1.0, 1.0]
+
+
+@pytest.mark.parametrize("pool,weight,size", [
+    (StockPool.CSI300, "weight_000300SH", 300), (StockPool.SSE50, "weight_000016SH", 50),
+])
+def test_real_index_pool_runs_arena_two_stage_query(pool, weight, size):
+    universe = Universe(pool=pool)
+    start, end = date(2024, 6, 1), date(2024, 8, 1)
+    panel = universe.evaluate(start, end)
+    # 第一阶段只取区间候选并集：每个候选都至少入池一天，逐日成分数与指数一致。
+    assert panel.any().all()
+    assert (panel.sum(axis=1) == size).all()
+    stacked = panel.stack()
+    members = set(stacked[stacked].index)
+
+    rank = {
+        "type": "CS", "op": "unary.rank_pct", "fields": {"col": "close"},
+        "params": {}, "on": Universe.member,
+    }
+    with universe.query(
+        start, end, factors=[weight, "close"], derivatives={"member_close_rank": rank},
+    ) as result:
+        frame = result.data
+        raw = result.session.run(f"""
+            select date(time) as date, string(code) as code from {CORE_TABLE}
+            where factor = `{weight}, time >= 2024.06.01, time < 2024.08.01, value > 0
+        """)
+    # 第二阶段不过滤：候选并集的每个交易日都有一行，成员节点作为列输出。
+    assert len(frame) == panel.size
+    member_rows = frame[Universe.member].eq(True)
+    assert member_rows.eq(frame[weight] > 0).all()
+    # on 只让当日成分参与截面排名：非成分行结果为 NULL，但不删除行。
+    assert frame.member_close_rank[~member_rows].isna().all()
+    assert frame.member_close_rank[member_rows & frame.close.notna()].notna().all()
+    raw_members = {
+        (day, engine_symbol(code))
+        for day, code in zip(pd.to_datetime(raw.date), raw.code, strict=True)
+        if day in panel.index
+    }
+    assert raw_members == members
+
+    with universe.query(start, end, factors=[weight], filters=[Universe.member]) as result:
+        frame = result.data
+    assert set(zip(pd.to_datetime(frame.time), frame.code.map(engine_symbol), strict=True)) == members
+
+
+def test_real_all_market_pool_has_no_first_stage():
+    universe = Universe()
+    assert universe.codes_query(date(2024, 7, 1), date(2024, 7, 6)) is None
+    panel = universe.evaluate(date(2024, 7, 1), date(2024, 7, 6))
+    assert len(panel) == 5
+    assert len(panel.columns) > 4000
+    assert panel.all().all()

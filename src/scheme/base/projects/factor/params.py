@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from scheme.base.internal.params import _all_market, validate_research
+from scheme.base.internal.params import validate_research
 from scheme.data.dolphindb.symbols import engine_symbol
 from scheme.data.dolphindb.universe import Universe
 
@@ -25,11 +25,11 @@ class FactorParams(BaseModel):
 
     start: date = Field(title="开始日期")
     end: date = Field(title="结束日期（不含）")
-    universe: Universe = Field(default_factory=_all_market, title="股票池设置")
+    universe: Universe = Field(default_factory=Universe, title="股票池设置")
 
     @model_validator(mode="after")
     def validate_research(self) -> Self:
-        validate_research(self.start, self.end, self.universe)
+        validate_research(self.start, self.end)
         return self
 
 

@@ -2,7 +2,7 @@
 
 import json
 import sys
-from datetime import date, timedelta
+from datetime import date
 from io import StringIO
 from types import ModuleType
 from typing import Annotated, Self, TypeVar
@@ -229,7 +229,7 @@ def test_backtest_config_preserves_project_defaults_but_ui_controls_cash_and_fee
     assert built.symbols == ["000001.XSHE"]
 
 
-@pytest.mark.parametrize("name", ["pool", "lookback", "cash", "commission", "tax", "build", "analysis_model"])
+@pytest.mark.parametrize("name", ["pool", "cash", "commission", "tax", "build", "analysis_model"])
 def test_business_field_names_cannot_shadow_form_conversion_or_methods(name):
     analysis = create_model("CollisionAnalysis", __base__=ModelAnalysisParams, **{name: (int, 3)})
     with pytest.raises(TypeError, match="保留字段冲突"):
@@ -541,14 +541,14 @@ def test_real_cli_and_factor_freeze_keep_the_existing_wire_contract(tmp_path, mo
     definition = json.loads(capsys.readouterr().out)
     assert definition["protocol"] == 2
     assert definition["values"]["form"]["days"] == 20
-    values = {**definition["values"]["form"], "days": 30, "lookback": "P40D"}
+    values = {**definition["values"]["form"], "days": 30, "pool": StockPool.CSI500}
     monkeypatch.setattr(sys, "stdin", StringIO(json.dumps({"form": values})))
     assert main(["parameters", "--project", str(tmp_path), "--validate"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert set(payload) == {"entry", "factor", "analysis"}
     assert payload["factor"]["window"] == 30
     assert "window" not in payload["analysis"]
-    assert payload["factor"]["universe"] == payload["analysis"]["universe"]
-    assert Form.model_validate(values).build().universe.lookback == timedelta(days=40)
+    assert payload["factor"]["universe"] == payload["analysis"]["universe"] == {"pool": "中证 500"}
+    assert Form.model_validate(values).build().universe.pool == StockPool.CSI500
     with pytest.raises(ValueError, match="未声明字段"):
         inspect_project(tmp_path, {"form": {**values, "window": 6}})

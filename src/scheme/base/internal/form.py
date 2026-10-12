@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Sequence
 from copy import deepcopy
-from datetime import date, timedelta
+from datetime import date
 from functools import cache
 from typing import (
     Annotated,
@@ -148,7 +148,6 @@ class ResearchForm[P: BaseModel](ReportForm[P]):
     pool: Literal[
         StockPool.ALL, StockPool.SSE50, StockPool.CSI300, StockPool.CSI500, StockPool.CSI1000
     ] = Field(default=StockPool.CSI300, title="股票池")
-    lookback: timedelta = Field(default=timedelta(0), title="回溯周期")
 
     @classmethod
     def __class_getitem__(cls, target: Any) -> type:
@@ -221,9 +220,7 @@ class ResearchForm[P: BaseModel](ReportForm[P]):
     def _analysis_values(self) -> dict[str, Any]:
         # 保留嵌套类型及 exclude=True 字段，隔离 validator 对原表单的修改。
         values = deepcopy(dict(self))
-        values["universe"] = Universe.model_validate({
-            "pool": values.pop("pool"), "lookback": values.pop("lookback"),
-        })
+        values["universe"] = Universe(pool=values.pop("pool"))
         return values
 
     def build(self) -> P:

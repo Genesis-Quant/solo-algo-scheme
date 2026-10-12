@@ -17,17 +17,9 @@ if TYPE_CHECKING:
 __all__ = ["StrategyParams", "StrategyAnalysisParams"]
 
 
-def _all_market() -> Universe:
-    return Universe.model_validate({
-        "derivatives": {"member": {"type": "DIRECT", "op": "nullary.true", "fields": {}}},
-        "filters": ["member"],
-    })
-
-
-def validate_research(start: date, end: date, universe: Universe) -> None:
+def validate_research(start: date, end: date) -> None:
     if start >= end:
         raise ValueError("日期区间必须满足 start < end，采用 [start, end)")
-    universe.query(start, end)
 
 
 def validate_backtest(
@@ -56,11 +48,11 @@ class StrategyParams(BaseModel):
 
     start: date = Field(title="开始日期")
     end: date = Field(title="结束日期（不含）")
-    universe: Universe = Field(default_factory=_all_market, title="股票池设置")
+    universe: Universe = Field(default_factory=Universe, title="股票池设置")
 
     @model_validator(mode="after")
     def validate_research(self) -> Self:
-        validate_research(self.start, self.end, self.universe)
+        validate_research(self.start, self.end)
         return self
 
 

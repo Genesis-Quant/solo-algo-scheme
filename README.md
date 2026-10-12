@@ -49,7 +49,7 @@ scheme/
 
 - `FactorParams`、`StrategyParams` 是构造因子和组装策略需要的运行参数，包含 `start`、`end`、`universe`。四类 Algo 的 Params 只声明自身算法字段，从统一策略参数提取，不携带回测配置。
 - `FactorAnalysisParams(FactorParams)` 增加 `columns`、`return_periods` 等分析选项，`StrategyAnalysisParams(StrategyParams)` 增加行情、基准和回测引擎设置；都实现 `run` 并返回报告。各环节的 `Model/Optimize/Control/ExecutionAnalysisParams` 直接继承对应的 Algo Params，增加独立研究所需的日期、股票池、回测设置和上游选择。
-- 五类公共 Form 由 Scheme 提供，项目只绑定自己的 AnalysisParams。`start/end/pool/lookback` 统一定义；四类策略环节还共享行情、基准、资金和费率。Scheme 负责 `pool/lookback → Universe`、资金费率 → `config` 以及 `build()`，不执行研究。
+- 五类公共 Form 由 Scheme 提供，项目只绑定自己的 AnalysisParams。`start/end/pool` 统一定义；四类策略环节还共享行情、基准、资金和费率。Scheme 负责 `pool → Universe`、资金费率 → `config` 以及 `build()`，不执行研究。
 
 项目自定义 AnalysisParams 同时继承本项目的具体 Params 与对应 Scheme AnalysisParams；算法字段只在 Params 声明一次。公共 Form 会自动读取具体 AnalysisParams 的字段、默认值、约束和 JSON Schema 元数据，`build()` 返回该具体类型，并执行它的字段及跨字段校验。运行时根据 Factor/Algo 的参数泛型构造新的具体 Params，只传算法声明的字段，不把分析字段泄漏给算法。
 
@@ -82,12 +82,12 @@ Factor 的项目输出列可以在项目 AnalysisParams 中声明一次，例如
 - 算法的 Pydantic decorator validators 在 `build()` 构造具体 AnalysisParams 时执行，不要求表单提前具备 `universe/config`；`build()` 不会调用 `run()`。项目新增的业务字段保留原始输入和 Schema，将转换、约束及模型校验统一推迟到 `build()`，避免转换两次或绕过算法的 strict/字符串规范化配置。不能把单独构造 Form 当作完整研究参数已经校验通过。
 - 项目在 AnalysisParams 中重新声明的平台字段（如 `start`、`benchmark`、`columns`）若只修改默认值、标题或约束，仍由表单校验并规范化，传给下游环节的公共值保持规范；带 Annotated 转换器、字段 validator 或嵌套模型时，与业务字段一样推迟到 `build()` 只执行一次。
 - 自动表单支持无参 `default_factory`；依赖其他已校验字段的默认工厂无法独立生成 UI 默认值，会在绑定时明确拒绝。字段间推导请放到 AnalysisParams 的 `model_validator`，或继续使用自定义 `ReportForm`。
-- `universe/config/symbols` 不直接暴露为 UI 输入。自定义股票池或引擎配置可以直接构造 AnalysisParams；策略 AnalysisParams 的额外 `config` 默认项会保留，资金和费率由表单输入决定。表单不提供的内部字段（如 `symbols`）在项目中重新声明时必须有默认值，否则绑定表单时报错。
-- `pool/lookback/cash/commission/tax` 等表单转换字段及表单方法名不能再作为另一个含义的算法字段；冲突明确报错，不静默覆盖。四类策略环节中，`model/optimize/control/execution` 是 Scheme 管理的上下游选择字段，项目参数不能声明同名字段。
+- `universe/config/symbols` 不直接暴露为 UI 输入，股票池通过 `pool` 选择。引擎配置可以直接构造 AnalysisParams；策略 AnalysisParams 的额外 `config` 默认项会保留，资金和费率由表单输入决定。表单不提供的内部字段（如 `symbols`）在项目中重新声明时必须有默认值，否则绑定表单时报错。
+- `pool/cash/commission/tax` 等表单转换字段及表单方法名不能再作为另一个含义的算法字段；冲突明确报错，不静默覆盖。四类策略环节中，`model/optimize/control/execution` 是 Scheme 管理的上下游选择字段，项目参数不能声明同名字段。
 - validation alias 的平铺输入键保持唯一。`AliasChoices` 中的 `AliasPath` 备用别名按分析参数自身语义读取嵌套值，不占用平铺键；只有纯 `AliasPath`、没有字符串别名的输入字段无法表示为扁平表单，会明确拒绝。
 - 旧的 `ReportForm[具体AnalysisParams]` 加手写 `build()` 仍受支持，未参数化的 Scheme 公共 Form 仍可直接使用。
 
-这种写法依赖 Scheme 1.3 的公共泛型表单，Algo 模板 1.3.x 因此声明 `scheme>=1.3.0,<1.4.0`。1.2.x 项目继续使用各自锁定的 Scheme 和手写 Form，不会被自动迁移。
+这种写法依赖 Scheme 1.3 起的公共泛型表单。Scheme 1.4 改为 Arena 股票池，Algo 模板 1.4.x 因此声明 `scheme>=1.4.0,<1.5.0`。1.2.x、1.3.x 项目继续使用各自锁定的 Scheme，不会被自动迁移。
 
 各项目导出对应的算法、Params、AnalysisParams 和 ReportForm。Factor 的 `params.run(Factor)` 接受类并自动构造其泛型声明的参数；四类 Algo 的 `params.run(当前Algo)` 根据上游选择组装完整策略。内置后续选项为 risk_parity（风险平价）、no_control（不风控）、direct_execution（不拆单）。Context 从 ModelAlgo 泛型解析，也可通过 `run(..., ctx=实例)` 传入。
 
@@ -140,6 +140,16 @@ logger.info("训练完成：%d 个样本", count)
 ```
 
 独立研究进程没有配置标准库日志时，研究包（`factor`、`model_1a2b` 等平台包名及其子模块）、Notebook（`__main__`）、`backtest` 和 `scheme` 的标准库日志按所选级别输出；其他第三方库只输出 WARNING 及以上。宿主已配置标准库日志时，保留已有处理器和 root 级别，日志继续由宿主处理，不替换或关闭其日志文件。Scheme 自身日志的格式和级别设置仍然生效。
+
+### 1.4.0 股票池按 Arena 两阶段契约重写
+
+- 股票池只保留 Arena 网页的五个选项：全市场、上证 50、沪深 300、中证 500、中证 1000。移除 `StockPool.CUSTOM`（“项目股票池”）以及 `Universe` 的 `lookback`、`codes`、`factors`、`derivatives`、`filters` 字段；`Universe` 只保存 `pool`，参数默认全市场，表单默认仍为沪深 300。
+- 公共表单移除股票池的“回溯周期”（`lookback`）字段。Arena 的第一阶段查询回溯固定为 `P0D`；需要历史窗口的查询通过 `Universe.query(..., lookback=...)` 指定。
+- 指数池改为两阶段查询：`codes_query` 取研究区间成员的候选并集，第二阶段只查询候选并集并注入成员节点；全市场没有第一阶段。成员条件来自 `MEMBERS` 映射（股票池 → DSL JSON），节点名由类属性 `Universe.member` 提供，值为 Arena 的 `stock_pool_member`。
+- 第二阶段不按成员过滤，成员节点作为逐日 BOOL 列输出，由下游加入 `filters`、作为 `on` 或直接读取。新增 `Universe.codes_query()`、`Universe.dataset_query()` 和在同一会话执行两阶段的 `Universe.query()`。
+- `Universe.evaluate()` 改由两阶段查询生成：列为候选并集（全市场为查询轴代码），值为当日成员节点；指数池逐日成分与 CoreData 中权重大于 0 的记录一致。回测未指定 `symbols` 时仍按面板列加载行情，已退出指数但仍持仓的股票照常有行情。
+
+任务 JSON 的 `universe` 只含 `pool`，报告文件和 Runtime 协议不变。股票池字段和查询接口不兼容，因此升级次版本：新建项目选择 Scheme v1.4.0 和 Algo 模板 v1.4.0；已有 1.2.x、1.3.x 项目、版本、成果和报告继续使用各自锁定的版本，不自动迁移，也不能与 1.4.x 项目互为上游或组装到同一策略。
 
 ### 1.3.4 日志审查问题修复
 
@@ -279,14 +289,10 @@ report = params.run(Factor)  # 传入项目的 Factor 类，自动构造 FactorP
 report.show()
 report.save(output_path)
 
-# 自定义股票池等分析参数时，可直接构造，无需经过表单。
+# 也可直接构造分析参数，无需经过表单。
 params = FactorAnalysisParams(
     start="2025-01-01", end="2026-01-01", columns=["momentum"],
-    universe=Universe(
-        codes=["000001.SZ"],
-        derivatives={"member": {"type": "DIRECT", "op": "nullary.true", "fields": {}}},
-        filters=["member"],
-    ),
+    universe=Universe(pool=StockPool.CSI500),
 )
 report = params.run(Factor)
 
@@ -346,31 +352,55 @@ StrategyParams 允许额外字段，例如 `window=20`、`gross_exposure=0.8`；
 JSON 中所有 Algo 参数统一写在 `backtest`，`algos` 只描述包与入口，不再接受各自的 `params`。
 
 `scheme.FactorParams` 和 `scheme.StrategyParams` 各自定义所属运行领域的 `start`、`end`、`universe`；
-`FactorAnalysisParams`、`StrategyAnalysisParams` 分别直接继承它们，不通过额外的日期或 Settings 混入类间接拼接。`universe` 是必须包含非空 `filters` 的 Arena DSL，
-日期取外层 `[start, end)`；默认使用恒真过滤条件表示全市场。沪深300示例：
+`FactorAnalysisParams`、`StrategyAnalysisParams` 分别直接继承它们，不通过额外的日期或 Settings 混入类间接拼接。
+日期取外层 `[start, end)`。
+
+### 股票池（1.4.0 起）
+
+`universe` 只选择 Arena 网页的股票池：`StockPool.ALL`（全市场）、`SSE50`（上证 50）、`CSI300`（沪深 300）、
+`CSI500`（中证 500）、`CSI1000`（中证 1000），默认全市场；表单默认沪深 300。股票池没有回溯周期。
+
+- **成员节点。** 节点名是类属性 `Universe.member`，值为 Arena 的 `stock_pool_member`。各股票池的成员条件直接写在
+  `MEMBERS` 映射中（股票池 → DSL JSON），须逐日返回 BOOL。当前四个指数池为 `binary.gt(指数权重, 0)`，权重字段分别为
+  `weight_000016SH`、`weight_000300SH`、`weight_000905SH`、`weight_000852SH`；全市场为恒真的 `nullary.true`。
+  需要复合条件时，把对应股票池的 JSON 改为组合表达式即可。
+- **指数动态池分两阶段。** 第一阶段 `codes_query` 用成员节点过滤，回溯为 `P0D`，取整个研究区间结果代码的并集；
+  它只确定第二阶段要加载的候选代码，不代表这些代码每天都是成分。第二阶段只查询候选并集，并注入同一个成员节点逐日判定成分。
+- **全市场没有第一阶段。** 第二阶段加载查询轴上的全部代码，成员节点恒为 true，不缩小股票池。
+- **第二阶段不按成员过滤。** 结果包含候选代码在每个交易日的行，成员节点作为逐日 BOOL 列 `Universe.member` 输出，
+  如何使用由下游决定：只保留当日成分时把 `Universe.member` 加入 `filters`；只限制截面计算范围时作为 CS 算符的 `on`，
+  例如 `"on": Universe.member`；也可以读取该列自行处理。DSL 直接引用 `Universe.member`，不需要手写节点名，但不能重新定义它。
+- **成分数据。** 指数权重来自 Tushare `index_weight`，每个自然日写入不晚于该日的最新快照。查询时，某日观察到该指数权重后，
+  其他代码缺失的权重先填 0，再按代码前向填充。权重 NULL 的日期按非成分处理。
 
 ```python
-from scheme import FactorParams
+from datetime import timedelta
 
-params = FactorParams(
-    start="2026-06-01", end="2026-07-01",
-    universe={
-        "lookback": "P40D",
-        "derivatives": {
-            "member": {
-                "type": "DIRECT", "op": "binary.gt",
-                "fields": {"left": "weight_000300SH", "right": 0.0},
-            },
-        },
-        "filters": ["member"],
+from scheme import StockPool, StrategyParams, Universe
+
+universe = Universe(pool=StockPool.CSI300)
+# 只在当日成分内做截面排名；非成分行的结果为 NULL。
+derivatives = {
+    "close_rank": {
+        "type": "CS", "op": "unary.rank_pct", "fields": {"col": "close"},
+        "on": Universe.member,
     },
-)
+}
+universe.codes_query(start, end)        # 第一阶段请求；全市场为 None
+universe.dataset_query(start, end, derivatives=derivatives)  # 第二阶段请求：已注入成员列，不过滤
+with universe.query(
+    start, end, lookback=timedelta(days=60), derivatives=derivatives,
+    filters=[Universe.member],          # 下游自行决定：只保留当日成分
+) as result:
+    frame = result.data                 # 两阶段在同一会话执行，在 with 内读取
+
+params = StrategyParams(start="2026-06-01", end="2026-07-01", universe=universe)
 panel = params.universe.evaluate(params.start, params.end)
 ```
 
-面板索引名为 `date`，覆盖查询区间的全部交易日；列为期间至少一次入池的股票代码（`.XSHG/.XSHE`），
-值为 `bool`。退池后为 `False`，某天没有成员时保留全 `False` 行；整个区间没有成员时保留日期、返回零列。
-`lookback` 用于 DSL 回看和历史权重前向填充，不进入输出日期范围；应覆盖起始日前最近一次成分权重记录。
+面板索引名为 `date`，为查询区间的交易日；列为第一阶段的候选并集（全市场为查询轴代码，`.XSHG/.XSHE`），
+值为当日的成员节点 `Universe.member`。退池后为 `False`，某天没有成员时保留全 `False` 行；指数池在整个区间没有成员时，
+第一阶段按 Arena 规则报错。
 Factor 和 Strategy 的 `universe` 属性首次访问时查询并缓存这张面板。
 Algo 可通过 `self.backtest.universe` 读取；回测未指定 `symbols` 时按面板列名加载行情，
 每日是否选股由 Algo 根据对应日期的布尔值判断。显式 `symbols` 仅控制行情加载范围。

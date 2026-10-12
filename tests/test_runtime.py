@@ -35,6 +35,7 @@ from scheme.base import (
 )
 from scheme.base.projects.optimize.default import risk_parity
 from scheme.config import DolphinSettings
+from scheme.data.dolphindb.universe import MEMBERS
 from scheme.execute.factor.api import prepare_panel
 from scheme.execute.factor.result import FactorAnalysisResult
 from scheme.execute.packages import load_entry, validate_environment
@@ -133,10 +134,7 @@ def test_factor_report_form_build_and_run(monkeypatch, settings):
     assert type(params) is FactorAnalysisParams
     assert (params.start, params.end) == (form.start, form.end)
     assert FactorAnalysisParams.model_validate_json(params.model_dump_json()) == params
-    assert params.universe.pool == StockPool.CSI300
-    assert params.universe.query(params.start, params.end).model_dump()["filters"] == [
-        "stock_pool_member"
-    ]
+    assert params.universe == Universe(pool=StockPool.CSI300)
     report = empty_factor_report(params)
     analyze = Mock(return_value=report)
     monkeypatch.setattr("scheme.execute.factor.api.analyze_factors", analyze)
@@ -160,17 +158,91 @@ def test_factor_report_form_build_and_run(monkeypatch, settings):
     assert analyze.call_count == 1
 
 
-def test_factor_analysis_accepts_custom_universe():
-    universe = Universe(
-        codes=["000001.SZ"],
-        derivatives={"member": {"type": "DIRECT", "op": "nullary.true", "fields": {}}},
-        filters=["member"],
-    )
-    params = FactorAnalysisParams(**DATES, columns=["f"], universe=universe)
-    assert params.universe.codes == ["000001.SZ"]
-    assert params.universe.query(params.start, params.end).model_dump()["end_date"] == "2025-01-02"
+INDEX_MEMBER = {
+    "type": "DIRECT", "op": "binary.gt", "fields": {"left": "weight_000300SH", "right": 0}, "params": {},
+}
+ALL_MARKET_MEMBER = {"type": "DIRECT", "op": "nullary.true", "fields": {}, "params": {}}
+
+
+def test_universe_offers_only_arena_stock_pools():
+    assert [pool.value for pool in StockPool] == ["全市场", "上证 50", "沪深 300", "中证 500", "中证 1000"]
+    assert Universe() == Universe(pool=StockPool.ALL)
+    assert FactorAnalysisParams(**DATES, columns=["f"]).universe == Universe()
+    for value in ({"pool": "项目股票池"}, {"pool": StockPool.CSI300, "lookback": "P5D"},
+                  {"pool": StockPool.CSI300, "filters": ["member"]}):
+        with pytest.raises(ValidationError):
+            Universe.model_validate(value)
     with pytest.raises(ValidationError):
-        FactorReportForm(**DATES, columns=["f"], pool=StockPool.CUSTOM)
+        FactorReportForm(**DATES, columns=["f"], pool="项目股票池")
+
+
+def test_member_is_a_class_attribute_not_a_parameter():
+    universe = Universe(pool=StockPool.CSI300)
+    assert Universe.member == universe.member == "stock_pool_member"
+    assert "member" not in Universe.model_fields
+    assert universe.model_dump(mode="json") == {"pool": "沪深 300"}
+    with pytest.raises(ValidationError):
+        Universe.model_validate({"pool": StockPool.CSI300, "member": "other"})
+    with pytest.raises(AttributeError):
+        universe.member = "other"
+
+
+def test_index_pool_codes_query_is_arena_first_stage():
+    codes_query = Universe(pool=StockPool.CSI300).codes_query(date(2025, 1, 1), date(2025, 1, 3))
+    assert codes_query.model_dump(mode="json") == {
+        "start_date": "2025-01-01", "end_date": "2025-01-02", "lookback": "PT0S",
+        "codes": [], "factors": [], "derivatives": {"stock_pool_member": INDEX_MEMBER},
+        "filters": ["stock_pool_member"],
+    }
+    weights = {
+        StockPool.SSE50: "weight_000016SH", StockPool.CSI300: "weight_000300SH",
+        StockPool.CSI500: "weight_000905SH", StockPool.CSI1000: "weight_000852SH",
+    }
+    for pool, weight in weights.items():
+        query = Universe(pool=pool).codes_query(date(2025, 1, 1), date(2025, 1, 3))
+        assert query.model_dump(mode="json")["derivatives"]["stock_pool_member"] == {
+            **INDEX_MEMBER, "fields": {"left": weight, "right": 0},
+        }
+    assert Universe().codes_query(date(2025, 1, 1), date(2025, 1, 3)) is None
+
+
+@pytest.mark.parametrize("pool", list(StockPool))
+def test_every_stock_pool_injects_its_mapped_member_definition(pool):
+    query = Universe(pool=pool).dataset_query(date(2025, 1, 1), date(2025, 1, 3), factors=["close"])
+    assert query.derivatives[Universe.member].model_dump(mode="json") == MEMBERS[pool]
+    assert query.filters == []
+
+
+@pytest.mark.parametrize("pool,member", [
+    (StockPool.CSI300, INDEX_MEMBER), (StockPool.ALL, ALL_MARKET_MEMBER),
+])
+def test_dataset_query_exposes_member_column_without_filtering(pool, member):
+    universe = Universe(pool=pool)
+    derivatives = {
+        "rank": {
+            "type": "CS", "op": "unary.rank_pct", "fields": {"col": "close"},
+            "params": {}, "on": Universe.member,
+        },
+        "valid": {"type": "DIRECT", "op": "binary.gt", "fields": {"left": "close", "right": 0}},
+    }
+    query = universe.dataset_query(
+        date(2025, 1, 1), date(2025, 1, 3),
+        factors=["close"], derivatives=derivatives, filters=["valid"],
+    ).model_dump(mode="json")
+    assert (query["start_date"], query["end_date"], query["codes"]) == ("2025-01-01", "2025-01-02", [])
+    assert list(query["derivatives"]) == ["stock_pool_member", "rank", "valid"]
+    assert query["derivatives"]["stock_pool_member"] == member
+    assert query["derivatives"]["rank"]["on"] == "stock_pool_member"
+    assert query["filters"] == ["valid"]
+    kept = universe.dataset_query(
+        date(2025, 1, 1), date(2025, 1, 3), factors=["close"], filters=["valid", Universe.member],
+        derivatives={"valid": derivatives["valid"]},
+    )
+    assert kept.filters == ["valid", "stock_pool_member"]
+    for authored in ({"factors": [Universe.member]},
+                     {"derivatives": {Universe.member: ALL_MARKET_MEMBER}}):
+        with pytest.raises(ValueError, match="stock_pool_member"):
+            universe.dataset_query(date(2025, 1, 1), date(2025, 1, 3), **authored)
 
 
 @pytest.mark.parametrize(

@@ -1,7 +1,7 @@
 """Focused parameter/form/projection contracts, without research services or output."""
 
 from dataclasses import fields, is_dataclass
-from datetime import date, timedelta
+from datetime import date
 from typing import Self, assert_type, get_args, get_origin, get_type_hints
 from unittest.mock import Mock
 
@@ -182,8 +182,8 @@ def test_shared_form_preserves_ui_and_concrete_analysis_contract(
     assert schema["properties"]["start"]["default"] == "2020-01-01"
     assert schema["properties"]["end"]["default"] == "2027-01-01"
     assert schema["additionalProperties"] is False
-    assert {"start", "end", "pool", "lookback"} <= set(schema["properties"])
-    assert not {"universe", "config", "symbols"} & set(schema["properties"])
+    assert {"start", "end", "pool"} <= set(schema["properties"])
+    assert not {"universe", "lookback", "config", "symbols"} & set(schema["properties"])
     assert all(not field.get("x-hidden") for field in schema["properties"].values())
     built = form.model_validate({**DATES, **values}).build()
     assert type(built) is analysis
@@ -202,12 +202,10 @@ def test_form_defaults_are_exposed_as_json_and_build_without_dates(
     assert initial["start"] == "2020-01-01"
     assert initial["end"] == "2027-01-01"
     assert initial["pool"] == StockPool.CSI300
-    assert initial["lookback"] == "PT0S"
     built = form.model_validate({**initial, **values}).build()
     assert type(built) is analysis
     assert (built.start, built.end) == (date(2020, 1, 1), date(2027, 1, 1))
-    assert built.universe.pool == StockPool.CSI300
-    assert built.universe.lookback == timedelta(0)
+    assert built.universe == Universe(pool=StockPool.CSI300)
     overridden = form.model_validate({**initial, **values, **DATES}).build()
     assert (overridden.start, overridden.end) == (date(2025, 1, 1), date(2025, 1, 3))
 
@@ -216,7 +214,7 @@ def test_factor_form_defaults_match_web_research_settings():
     initial = defaults(FactorReportForm)
     assert initial == {
         "start": "2020-01-01", "end": "2027-01-01", "pool": StockPool.CSI300,
-        "lookback": "PT0S", "return_periods": [1, 5, 20], "groups": 5,
+        "return_periods": [1, 5, 20], "groups": 5,
         "n_select": 10, "weight": "market_value", "calendar_symbol": "000300.XSHG",
     }
     assert FactorReportForm.model_fields["columns"].is_required()
@@ -262,12 +260,11 @@ def test_stage_form_selectors_and_engine_values_have_explicit_wire_shape(
 ):
     built = form.model_validate({
         **DATES, **selectors, "cash": 350_000, "commission": 0.001, "tax": 0.002,
-        "benchmark": "000300.SH", "pool": StockPool.CSI500, "lookback": "P5D",
+        "benchmark": "000300.SH", "pool": StockPool.CSI500,
     }).build()
     assert built.config == {"cash": 350_000, "commission": 0.001, "tax": 0.002}
     assert built.benchmark == "000300.XSHG"
-    assert built.universe.pool == StockPool.CSI500
-    assert built.universe.lookback == timedelta(days=5)
+    assert built.universe == Universe(pool=StockPool.CSI500)
     assert not {"cash", "commission", "tax", "pool", "lookback"} & set(built.model_dump())
     schema = form.model_json_schema()
     for name in selectors:

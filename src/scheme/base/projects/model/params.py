@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from scheme.base.internal.context import ResearchContext
-from scheme.base.internal.params import _all_market, validate_backtest, validate_research
+from scheme.base.internal.params import validate_backtest, validate_research
 from scheme.data.dolphindb.universe import Universe
 
 if TYPE_CHECKING:
@@ -31,7 +31,7 @@ class ModelAnalysisParams(ModelParams):
 
     start: date = Field(title="开始日期")
     end: date = Field(title="结束日期（不含）")
-    universe: Universe = Field(default_factory=_all_market, title="股票池设置")
+    universe: Universe = Field(default_factory=Universe, title="股票池设置")
     market_data: Literal["stock_daily", "stock_snapshot"] = Field(
         default="stock_daily",
         title="行情类型",
@@ -57,7 +57,7 @@ class ModelAnalysisParams(ModelParams):
 
     @model_validator(mode="after")
     def validate_analysis(self) -> Self:
-        validate_research(self.start, self.end, self.universe)
+        validate_research(self.start, self.end)
         self.symbols, self.benchmark = validate_backtest(self.config, self.symbols, self.benchmark)
         return self
 
