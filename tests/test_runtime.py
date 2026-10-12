@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from copy import deepcopy
 from datetime import date
 from importlib.metadata import distribution
@@ -36,7 +37,7 @@ from scheme.base import (
 from scheme.base.projects.optimize.default import risk_parity
 from scheme.config import DolphinSettings
 from scheme.data.dolphindb.universe import MEMBERS
-from scheme.execute.factor.api import prepare_panel
+from scheme.execute.factor.api import analyze_factors, prepare_panel
 from scheme.execute.factor.result import FactorAnalysisResult
 from scheme.execute.packages import load_entry, validate_environment
 from scheme.execute.schema import Environment, FactorTask, StrategyTask
@@ -123,6 +124,26 @@ def test_factor_panel_uses_half_open_dates(day):
     )
     with pytest.raises(ValueError, match="日期范围外"):
         prepare_panel(panel, params)
+
+
+@pytest.mark.parametrize("periods", [[1], [1, 5, 20], [60]])
+def test_factor_returns_are_read_only_until_end(monkeypatch, settings, periods):
+    requests = []
+
+    class Stop(Exception):
+        pass
+
+    def capture(request, *, session):
+        requests.append(request)
+        raise Stop
+
+    monkeypatch.setattr("scheme.execute.factor.api.query", capture)
+    monkeypatch.setattr("scheme.execute.factor.api.create_session", lambda _: nullcontext(object()))
+    params = FactorAnalysisParams(**DATES, columns=["f"], return_periods=periods)
+    with pytest.raises(Stop):
+        analyze_factors(ExampleFactor(FactorParams(**DATES)), params, settings=settings)
+    # 与 Arena 相同：不读取结束日之后的行情，持有期长短不改变读取区间。
+    assert (requests[0]["start_date"], requests[0]["end_date"]) == ("2025-01-01", "2025-01-02")
 
 
 def test_factor_report_form_build_and_run(monkeypatch, settings):

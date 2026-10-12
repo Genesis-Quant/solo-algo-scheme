@@ -59,12 +59,11 @@ def analyze_factors[P: FactorParams, A: FactorAnalysisParams](
         len(source), source.code.nunique(), source.time.nunique(), perf_counter() - started,
     )
     with create_session(settings) as session:
-        # 日历缓冲只用于读取；尾部不足的未来收益保留 NULL，不填零。
-        end = parameters.end + timedelta(days=max(parameters.return_periods) * 4 + 30)
+        # 收益只读到结束日，与 Arena 一致：区间末尾不足持有期的收益为 NULL，不填零。
         with query(
             {
                 "start_date": parameters.start.isoformat(),
-                "end_date": (end - timedelta(days=1)).isoformat(),
+                "end_date": (parameters.end - timedelta(days=1)).isoformat(),
                 "codes": sorted(
                     {source_symbol(s) for s in source.code}
                     | {source_symbol(parameters.calendar_symbol)}

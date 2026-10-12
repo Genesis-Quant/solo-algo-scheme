@@ -379,9 +379,14 @@ def test_real_factor_query_pipeline():
             n_select=1,
         ),
     )
-    assert result.processed_data.score.tolist() == [1.0, 2.0, 2.0, 1.0]
-    assert result.processed_data.score_group.tolist() == [0, 1, 1, 0]
-    assert result.processed_data[["return_1", "return_5"]].notna().all().all()
+    frame = result.processed_data
+    assert frame.score.tolist() == [1.0, 2.0, 2.0, 1.0]
+    assert frame.score_group.tolist() == [0, 1, 1, 0]
+    # 收益只读到结束日：最后一个交易日没有 1 日收益，两天的区间也没有 5 日收益。
+    first = frame.time == frame.time.min()
+    assert frame.loc[first, "return_1"].notna().all()
+    assert frame.loc[~first, "return_1"].isna().all()
+    assert frame.return_5.isna().all()
     assert result.execution_statistics.retention_rate.tolist() == [1.0, 1.0]
 
 

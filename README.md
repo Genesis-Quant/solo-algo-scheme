@@ -141,6 +141,13 @@ logger.info("训练完成：%d 个样本", count)
 
 独立研究进程没有配置标准库日志时，研究包（`factor`、`model_1a2b` 等平台包名及其子模块）、Notebook（`__main__`）、`backtest` 和 `scheme` 的标准库日志按所选级别输出；其他第三方库只输出 WARNING 及以上。宿主已配置标准库日志时，保留已有处理器和 root 级别，日志继续由宿主处理，不替换或关闭其日志文件。Scheme 自身日志的格式和级别设置仍然生效。
 
+### 1.4.1 因子收益截止日修复
+
+- 因子收益行情只读取研究区间 `[start, end)`，不再为最长持有期读取结束日之后的行情。
+- 区间最后 N 个交易日的 N 日收益为空，不补零；因子值、分组和换手率保留，缺少收益的日期不产生对应周期的 IC 与分组收益。
+
+Python 接口、任务 JSON 和报告结构不变，Algo 模板 v1.4.0 继续兼容。新建项目选择 Scheme v1.4.1 后生效；已有项目继续使用各自锁定的版本，历史报告不改写。
+
 ### 1.4.0 股票池按 Arena 两阶段契约重写
 
 - 股票池只保留 Arena 网页的五个选项：全市场、上证 50、沪深 300、中证 500、中证 1000。移除 `StockPool.CUSTOM`（“项目股票池”）以及 `Universe` 的 `lookback`、`codes`、`factors`、`derivatives`、`filters` 字段；`Universe` 只保存 `pool`，参数默认全市场，表单默认仍为沪深 300。
@@ -328,7 +335,9 @@ snapshot 模式接收 Arena StockSnapshot 的 Market、SecurityID、TradeDate、
 
 因子收益通过 Arena query DSL 在 DolphinDB 中计算：复权收盘价 shift(-N) / 当日复权收盘价 - 1，按交易日轴对齐，不重复处理 Factor 的预处理。
 Factor 面板上传后，在同一 DolphinDB 会话内拼接收益率、过滤空值、生成分组并调用 Arena factor 模块计算报告；Python 只下载最终报告表。
-默认等权分组，market_value 使用 circ_mv；只生成分组标签，不修改因子值。尾部不足的未来收益保留空值。
+默认等权分组，market_value 使用 circ_mv；只生成分组标签，不修改因子值。
+收益只读取到结束日为止，与 Arena 相同：不读取结束日之后的行情，区间最后 N 个交易日的 N 日收益为空，不填零；
+这些交易日仍保留因子、分组和换手率，只是不产生 IC 与分组收益。
 评价交易日轴由 calendar_symbol（默认沪深300）行情确定，缺少基准数据报错。
 未来收益只进入评价，不能传给 Model。默认风险平价缺少历史样本或求解失败时退化等权并记录原因。
 
