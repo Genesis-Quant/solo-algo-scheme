@@ -1,6 +1,6 @@
 """所有研究 Algo 的公共基类。"""
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from backtest import Algo as BaseAlgo
 from pydantic import BaseModel
@@ -10,8 +10,11 @@ if TYPE_CHECKING:
 
 __all__ = ["Algo"]
 
+P = TypeVar("P", infer_variance=True)
+C = TypeVar("C", bound=BaseModel, infer_variance=True)
 
-class Algo[P, C: BaseModel](BaseAlgo[P, C]):
+
+class Algo(BaseAlgo[P, C], Generic[P, C]):
     backtest: "Backtest[C]"
 
     def __init__(self, params: P) -> None:

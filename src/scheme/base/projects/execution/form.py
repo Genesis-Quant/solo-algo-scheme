@@ -1,5 +1,7 @@
 """Execution 项目的回测报告表单。"""
 
+from typing import Generic, TypeVar
+
 from pydantic import Field
 
 from scheme.base.internal.form import BacktestForm
@@ -8,8 +10,10 @@ from .params import ExecutionAnalysisParams
 
 __all__ = ["ExecutionReportForm"]
 
+P = TypeVar("P", bound=ExecutionAnalysisParams, infer_variance=True)
 
-class ExecutionReportForm[P: ExecutionAnalysisParams](BacktestForm[P]):
+
+class ExecutionReportForm(BacktestForm[P], Generic[P]):
     _analysis_base = ExecutionAnalysisParams
     _analysis_model = ExecutionAnalysisParams
 

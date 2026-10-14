@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from datetime import date
 from functools import cached_property
+from typing import Generic, TypeVar
 
 import pandas as pd
 
@@ -8,8 +9,10 @@ from .params import FactorParams
 
 __all__ = ["Factor"]
 
+P = TypeVar("P", bound=FactorParams, infer_variance=True)
 
-class Factor[P: FactorParams](ABC):
+
+class Factor(ABC, Generic[P]):
     """因子计算基类；参数提供研究日期和股票池，不参与 Algo 事件回调。"""
 
     def __init__(self, params: P) -> None:

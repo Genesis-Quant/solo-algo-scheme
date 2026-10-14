@@ -1,6 +1,6 @@
 """用于 UI 的因子分析表单。"""
 
-from typing import Literal
+from typing import Generic, Literal, TypeVar
 
 from pydantic import Field
 
@@ -10,8 +10,10 @@ from .params import FactorAnalysisParams
 
 __all__ = ["FactorReportForm"]
 
+P = TypeVar("P", bound=FactorAnalysisParams, infer_variance=True)
 
-class FactorReportForm[P: FactorAnalysisParams](ResearchForm[P]):
+
+class FactorReportForm(ResearchForm[P], Generic[P]):
     _analysis_base = FactorAnalysisParams
     _analysis_model = FactorAnalysisParams
 

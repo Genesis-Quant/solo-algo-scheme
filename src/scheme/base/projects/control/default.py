@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 from pydantic import Field
 
@@ -16,12 +16,14 @@ __all__ = ["ControlParams", "NoControl"]
 
 log = get_logger("scheme.control")
 
+C = TypeVar("C", bound=ResearchContext[Any], infer_variance=True)
+
 
 class ControlParams(BaseControlParams):
     lot_size: int = Field(default=100, ge=1)
 
 
-class NoControl[C: ResearchContext[Any]](ControlAlgo[ControlParams, C]):
+class NoControl(ControlAlgo[ControlParams, C], Generic[C]):
     def __init__(self, params: ControlParams | None = None) -> None:
         super().__init__(params if params is not None else ControlParams())
 

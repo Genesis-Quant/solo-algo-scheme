@@ -1,7 +1,7 @@
 """OptimizeAlgo 研究项目基类。"""
 
 from abc import abstractmethod
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel
 
@@ -12,8 +12,11 @@ from scheme.data.dolphindb.symbols import normalize_assets
 
 __all__ = ["OptimizeAlgo"]
 
+P = TypeVar("P", bound=BaseModel, infer_variance=True)
+C = TypeVar("C", bound=ResearchContext[Any], infer_variance=True)
 
-class OptimizeAlgo[P: BaseModel, C: ResearchContext[Any]](Algo[P, C]):
+
+class OptimizeAlgo(Algo[P, C], Generic[P, C]):
     def process(self) -> bool:
         signals = self.ctx.signal
         if signals is None or self.ctx.target is not None:

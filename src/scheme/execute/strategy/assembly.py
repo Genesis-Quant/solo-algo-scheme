@@ -3,7 +3,7 @@
 from collections.abc import Sequence
 from functools import cached_property
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast, get_args, get_origin, overload
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast, overload
 
 import pandas as pd
 from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict
@@ -12,50 +12,48 @@ from scheme.base import (
     Algo,
     ControlAlgo,
     ExecutionAlgo,
+    Factor,
     OptimizeAlgo,
     ResearchContext,
     StrategyParams,
 )
+from scheme.base.internal.generic import generic_arguments
 
 if TYPE_CHECKING:
-    from scheme.base.projects.factor.algo import Factor
     from scheme.base.projects.factor.params import FactorParams
 
 __all__ = ["AlgoComponents", "Strategy"]
 
+P = TypeVar("P", bound=BaseModel)
+FactorP = TypeVar("FactorP", bound="FactorParams")
+StrategyP = TypeVar("StrategyP", bound=StrategyParams, infer_variance=True)
+C = TypeVar("C", bound=ResearchContext[Any], infer_variance=True)
+T = TypeVar("T", infer_variance=True)
 
-def _generic_model(
-    cls: type, index: int, bindings: dict[Any, Any] | None = None
-) -> type[BaseModel]:
+
+def _generic_model(cls: type, index: int) -> type[BaseModel]:
     """从 Factor[P] / Algo[P, C] 的继承关系解析参数或上下文模型。"""
-    bindings = bindings or {}
-    for base in cls.__dict__.get("__orig_bases__", cls.__bases__):
-        origin = get_origin(base) or base
-        args = tuple(bindings.get(arg, arg) for arg in get_args(base))
-        if origin.__name__ in {"Algo", "Factor"} and origin.__module__.split(".")[0] in {
-            "backtest",
-            "scheme",
-        }:
-            if len(args) > index:
-                model = args[index]
-                model = getattr(model, "__bound__", None) or model
-                if isinstance(model, type) and issubclass(model, BaseModel):
-                    return model
-        mapping = dict(zip(getattr(origin, "__type_params__", ()), args))
-        if origin is not object:
-            try:
-                return _generic_model(origin, index, mapping)
-            except TypeError:
-                pass
+    from backtest import Algo as BacktestAlgo
+
+    try:
+        args = generic_arguments(cls, (Factor, Algo, BacktestAlgo))
+    except TypeError as error:
+        raise TypeError(f"{cls.__name__} 必须明确指定 BaseModel 参数泛型") from error
+    if len(args) > index:
+        model = args[index]
+        if isinstance(model, TypeVar):
+            model = model.__bound__
+        if isinstance(model, type) and issubclass(model, BaseModel):
+            return model
     raise TypeError(f"{cls.__name__} 必须明确指定 BaseModel 参数泛型")
 
 
 @overload
-def parameter_type[P: "FactorParams"](cls: "type[Factor[P]]") -> type[P]: ...
+def parameter_type(cls: "type[Factor[FactorP]]") -> type[FactorP]: ...
 
 
 @overload
-def parameter_type[P: BaseModel, C: ResearchContext[Any]](cls: type[Algo[P, C]]) -> type[P]: ...
+def parameter_type(cls: type[Algo[P, C]]) -> type[P]: ...
 
 
 def parameter_type(cls: type) -> type[BaseModel]:
@@ -95,7 +93,7 @@ def _with_alias_path(value: Any, path: Sequence[str | int], field_value: Any) ->
     return items
 
 
-def project_parameters[P: BaseModel](
+def project_parameters(
     model: type[P], source: BaseModel | dict[str, Any], *, overrides: dict[str, Any] | None = None,
 ) -> P:
     # dict(model) retains raw nested models and fields excluded from serialization.
@@ -120,7 +118,7 @@ def project_parameters[P: BaseModel](
     return model.model_validate(SimpleNamespace(**values), from_attributes=True)
 
 
-def context_type[P: BaseModel, C: ResearchContext[Any]](cls: type[Algo[P, C]]) -> type[C]:
+def context_type(cls: type[Algo[P, C]]) -> type[C]:
     context = _generic_model(cls, 1)
     if not issubclass(context, ResearchContext):
         raise TypeError("Model 上下文必须继承 ResearchContext")
@@ -138,7 +136,7 @@ def validate_context(algo: Any, ctx: BaseModel) -> None:
         )
 
 
-class AlgoComponents[T](BaseModel):
+class AlgoComponents(BaseModel, Generic[T]):
     """T 可以是待安装的包描述；字段与顺序由 scheme 维护。"""
 
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
@@ -149,14 +147,14 @@ class AlgoComponents[T](BaseModel):
     execution: T | None = None
 
 
-class Strategy[P: StrategyParams, C: ResearchContext[Any]]:
+class Strategy(Generic[StrategyP, C]):
     """从统一参数实例化 Algo 类，省略的下游环节使用默认算法。"""
 
     def __init__(
         self,
         ctx: C,
         *,
-        params: P,
+        params: StrategyP,
         model: type[Algo[Any, C]],
         optimize: type[OptimizeAlgo[Any, C]] | None = None,
         control: type[ControlAlgo[Any, C]] | None = None,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import time
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 import pandas as pd
 
@@ -17,12 +17,14 @@ __all__ = ["DefaultParams", "DirectExecution"]
 
 log = get_logger("scheme.execution")
 
+C = TypeVar("C", bound=ResearchContext[Any], infer_variance=True)
+
 
 class DefaultParams(BaseExecutionParams):
     pass
 
 
-class DirectExecution[C: ResearchContext[Any]](ExecutionAlgo[DefaultParams, C]):
+class DirectExecution(ExecutionAlgo[DefaultParams, C], Generic[C]):
     def __init__(self, params: DefaultParams | None = None) -> None:
         super().__init__(params if params is not None else DefaultParams())
 

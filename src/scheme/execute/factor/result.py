@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar
 
 import pandas as pd
 
@@ -8,9 +8,11 @@ from scheme.report.base import Report
 if TYPE_CHECKING:
     from scheme.base import FactorAnalysisParams
 
+P = TypeVar("P", bound="FactorAnalysisParams", infer_variance=True)
+
 
 @dataclass
-class FactorAnalysisResult[P: "FactorAnalysisParams"](Report):
+class FactorAnalysisResult(Report, Generic[P]):
     processed_data: pd.DataFrame
     execution_statistics: pd.DataFrame
     information_coefficient: pd.DataFrame

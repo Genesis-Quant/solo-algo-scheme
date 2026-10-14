@@ -1,7 +1,7 @@
 """策略运行参数及其回测分析参数。"""
 
 from datetime import date
-from typing import TYPE_CHECKING, Any, Literal, Self
+from typing import TYPE_CHECKING, Any, Literal, Self, TypeVar
 
 from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field, model_validator
 
@@ -15,6 +15,9 @@ if TYPE_CHECKING:
     from scheme.execute.strategy.result import BacktestResult
 
 __all__ = ["StrategyParams", "StrategyAnalysisParams"]
+
+P = TypeVar("P", bound="StrategyParams")
+C = TypeVar("C", bound=ResearchContext[Any])
 
 
 def validate_research(start: date, end: date) -> None:
@@ -75,7 +78,7 @@ class StrategyAnalysisParams(StrategyParams):
         self.symbols, self.benchmark = validate_backtest(self.config, self.symbols, self.benchmark)
         return self
 
-    def run[P: StrategyParams, C: ResearchContext[Any]](
+    def run(
         self,
         strategy: "Strategy[P, C]",
         *,

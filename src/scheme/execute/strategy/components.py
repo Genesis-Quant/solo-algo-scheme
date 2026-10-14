@@ -2,7 +2,7 @@
 
 import importlib
 from importlib import metadata
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from packaging.version import Version
 from pydantic import BaseModel
@@ -33,6 +33,10 @@ BASES = {
 __all__ = ["algo_options"]
 
 log = get_logger("scheme.research")
+
+A = TypeVar("A", bound=BaseModel)
+P = TypeVar("P", bound=BaseModel)
+C = TypeVar("C", bound=ResearchContext[Any])
 
 
 def algo_options(kind: str) -> dict[str, str]:
@@ -84,7 +88,7 @@ def research_components(
     return components
 
 
-def run_research[A: BaseModel, P: BaseModel, C: ResearchContext[Any]](
+def run_research(
     params: A,
     kind: str,
     current: type[Algo[P, C]],

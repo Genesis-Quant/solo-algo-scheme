@@ -1,7 +1,7 @@
 """因子运行参数及其分析参数。"""
 
 from datetime import date
-from typing import TYPE_CHECKING, Literal, Self
+from typing import TYPE_CHECKING, Literal, Self, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -16,6 +16,8 @@ if TYPE_CHECKING:
     from .algo import Factor
 
 __all__ = ["FactorParams", "FactorAnalysisParams"]
+
+P = TypeVar("P", bound="FactorParams")
 
 
 class FactorParams(BaseModel):
@@ -59,7 +61,7 @@ class FactorAnalysisParams(FactorParams):
             raise ValueError("收益持有期不能重复")
         return self
 
-    def run[P: FactorParams](
+    def run(
         self, factor: "type[Factor[P]]", *, settings: "DolphinSettings | None" = None
     ) -> "FactorAnalysisResult[Self]":
         from scheme.execute.factor.api import analyze_factors

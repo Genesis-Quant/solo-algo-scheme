@@ -1,10 +1,13 @@
 """行情源与回测引擎的证券代码转换。"""
 
 from collections.abc import Mapping
+from typing import TypeVar
 
 from backtest import Order
 
 __all__ = ["engine_symbol", "source_symbol", "normalize_assets", "normalize_order"]
+
+T = TypeVar("T")
 
 
 def source_symbol(symbol: str) -> str:
@@ -23,7 +26,7 @@ def engine_symbol(symbol: str) -> str:
     )
 
 
-def normalize_assets[T](assets: Mapping[str, T]) -> dict[str, T]:
+def normalize_assets(assets: Mapping[str, T]) -> dict[str, T]:
     """研究链路统一使用 .XSHE/.XSHG；同一证券的不同别名不得重复出现。"""
     normalized: dict[str, T] = {}
     for symbol, value in assets.items():

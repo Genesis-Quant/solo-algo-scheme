@@ -2,7 +2,16 @@
 
 from dataclasses import fields, is_dataclass
 from datetime import date
-from typing import Self, assert_type, get_args, get_origin, get_type_hints
+from typing import (
+    Annotated,
+    Generic,
+    Self,
+    TypeVar,
+    assert_type,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 from unittest.mock import Mock
 
 import pandas as pd
@@ -539,12 +548,14 @@ def test_projection_alias_defaults_and_present_invalid_values():
             project_parameters(Runtime, ModelAnalysisParams(**DATES, count=17, n_select=invalid))
 
 
-def test_pep695_multilevel_factor_parameter_resolution():
-    class Generic[P: FactorParams](Factor[P]):
+def test_typevar_multilevel_factor_parameter_resolution():
+    P = TypeVar("P", bound=FactorParams)
+
+    class FactorGeneric(Factor[P], Generic[P]):
         def compute(self, start: date, end: date) -> pd.DataFrame:
             raise AssertionError("must not compute")
 
-    class Forwarded[P: FactorParams](Generic[P]):
+    class Forwarded(FactorGeneric[P], Generic[P]):
         pass
 
     class Concrete(Forwarded[WindowParams]):
@@ -553,23 +564,70 @@ def test_pep695_multilevel_factor_parameter_resolution():
     class Leaf(Concrete):
         pass
 
-    assert parameter_type(Generic) is FactorParams
+    assert parameter_type(FactorGeneric) is FactorParams
     assert parameter_type(Concrete) is WindowParams
     assert parameter_type(Leaf) is WindowParams
     assert_type(parameter_type(Leaf), type[WindowParams])
 
 
-def test_pep695_multilevel_reordered_typevars_resolve_params_and_context():
-    class Generic[P: BaseModel, C: ResearchContext[float]](Algo[P, C]):
+def test_unparameterized_factor_mixin_does_not_hide_concrete_parameters():
+    class FactorMixin(Factor):
         pass
 
-    class Reordered[C: ResearchContext[float], P: BaseModel](Generic[P, C]):
+    class Concrete(FactorMixin, Factor[WindowParams]):
+        def compute(self, start: date, end: date) -> pd.DataFrame:
+            raise AssertionError("must not compute")
+
+    class Leaf(Concrete):
         pass
 
-    class Forwarded[P: BaseModel, C: ResearchContext[float]](Reordered[C, P]):
+    for cls in (Concrete, Leaf):
+        assert parameter_type(cls) is WindowParams
+        params = WindowParams(**DATES, window=20)
+        assert cls(params).params is params
+    with pytest.raises(TypeError, match="BaseModel 参数泛型"):
+        parameter_type(FactorMixin)
+
+
+@pytest.mark.parametrize("mixin_first", [True, False])
+def test_unparameterized_algo_mixin_does_not_hide_parameters_or_context(mixin_first):
+    class AlgoMixin(Algo):
         pass
 
-    class Partial[C: ResearchContext[float]](Forwarded[SelectionParams, C]):
+    bound = ModelAlgo[SelectionParams, ContractState]
+    bases = (AlgoMixin, bound) if mixin_first else (bound, AlgoMixin)
+
+    class Concrete(*bases):
+        pass
+
+    class Leaf(Concrete):
+        pass
+
+    for cls in (Concrete, Leaf):
+        assert parameter_type(cls) is SelectionParams
+        assert context_type(cls) is ContractState
+        algo = cls(SelectionParams(n_select=2))
+        validate_context(algo, ContractState())
+        with pytest.raises(TypeError, match="ContractState"):
+            validate_context(algo, ResearchContext[str]())
+    with pytest.raises(TypeError, match="BaseModel 参数泛型"):
+        parameter_type(AlgoMixin)
+
+
+def test_typevar_multilevel_reordered_typevars_resolve_params_and_context():
+    P = TypeVar("P", bound=BaseModel)
+    C = TypeVar("C", bound=ResearchContext[float])
+
+    class AlgoGeneric(Algo[P, C], Generic[P, C]):
+        pass
+
+    class Reordered(AlgoGeneric[P, C], Generic[C, P]):
+        pass
+
+    class Forwarded(Reordered[C, P], Generic[P, C]):
+        pass
+
+    class Partial(Forwarded[SelectionParams, C], Generic[C]):
         pass
 
     class Concrete(Partial[ContractState]):
@@ -587,6 +645,95 @@ def test_pep695_multilevel_reordered_typevars_resolve_params_and_context():
             validate_context(algo, ResearchContext[str]())
     assert_type(parameter_type(Leaf), type[SelectionParams])
     assert_type(context_type(Leaf), type[ContractState])
+
+
+def test_nested_pydantic_context_typevar_is_bound():
+    T = TypeVar("T")
+
+    class GenericModel(ModelAlgo[SelectionParams, ResearchContext[T]], Generic[T]):
+        pass
+
+    class Concrete(GenericModel[float]):
+        pass
+
+    assert parameter_type(Concrete) is SelectionParams
+    assert context_type(Concrete) is ResearchContext[float]
+    algo = Concrete(SelectionParams(n_select=2))
+    validate_context(algo, ResearchContext[float]())
+    with pytest.raises(TypeError):
+        validate_context(algo, ResearchContext[str]())
+
+
+def test_nested_containers_and_multiple_context_typevars_are_bound():
+    T = TypeVar("T")
+    U = TypeVar("U")
+
+    class State(ResearchContext[dict[str, list[T]]], Generic[T, U]):
+        label: U
+
+    class GenericModel(ModelAlgo[SelectionParams, State[T, U]], Generic[T, U]):
+        pass
+
+    class Concrete(GenericModel[float, str]):
+        pass
+
+    assert context_type(Concrete) is State[float, str]
+    algo = Concrete(SelectionParams(n_select=2))
+    validate_context(algo, State[float, str](label="ready"))
+    with pytest.raises(TypeError):
+        validate_context(algo, State[int, str](label="ready"))
+
+
+def test_annotated_context_typevar_preserves_metadata():
+    T = TypeVar("T")
+    metadata = Field(description="signal")
+
+    class GenericModel(
+        ModelAlgo[SelectionParams, ResearchContext[Annotated[T, metadata]]], Generic[T]
+    ):
+        pass
+
+    class Concrete(GenericModel[float]):
+        pass
+
+    assert parameter_type(Concrete) is SelectionParams
+    expected = ResearchContext[Annotated[float, metadata]]
+    assert context_type(Concrete) is expected
+    bound_annotation = expected.__pydantic_generic_metadata__["args"][0]
+    assert get_args(bound_annotation)[1] is metadata
+    validate_context(Concrete(SelectionParams(n_select=2)), expected())
+
+
+def test_optional_pydantic_context_typevar_is_bound():
+    T = TypeVar("T")
+
+    class Box(BaseModel, Generic[T]):
+        value: T
+
+    class GenericModel(
+        ModelAlgo[SelectionParams, ResearchContext[Box[T] | None]], Generic[T]
+    ):
+        pass
+
+    class Concrete(GenericModel[float]):
+        pass
+
+    assert parameter_type(Concrete) is SelectionParams
+    expected = ResearchContext[Box[float] | None]
+    assert context_type(Concrete) is expected
+    validate_context(Concrete(SelectionParams(n_select=2)), expected())
+    with pytest.raises(TypeError):
+        validate_context(Concrete(SelectionParams(n_select=2)), ResearchContext[Box[int] | None]())
+
+
+def test_unbound_typevar_without_model_bound_is_rejected():
+    P = TypeVar("P")
+
+    class GenericModel(Algo[P, ContractState], Generic[P]):
+        pass
+
+    with pytest.raises(TypeError, match="BaseModel 参数泛型"):
+        parameter_type(GenericModel)
 
 
 def test_generic_resolution_rejects_missing_model_and_nonresearch_context():
@@ -627,20 +774,25 @@ def test_run_annotation_preserves_self_and_generic_result(analysis, result_model
         ModelAlgo=ModelAlgo, OptimizeAlgo=OptimizeAlgo, ControlAlgo=ControlAlgo,
         ExecutionAlgo=ExecutionAlgo, DolphinSettings=DolphinSettings,
     )
-    bindings = {param.__name__: param for param in run.__type_params__}
-    hints = get_type_hints(run, globalns=namespace, localns=bindings)
+    hints = get_type_hints(run, globalns=namespace)
     assert get_origin(hints["return"]) is result_model
     assert get_args(hints["return"]) == (Self,)
-    assert run.__type_params__
+    argument = hints["factor"] if analysis is FactorAnalysisParams else (
+        hints["strategy"] if analysis is StrategyAnalysisParams else hints["algo"]
+    )
+    algo_type = get_args(argument)[0] if get_origin(argument) is type else argument
+    parameter = get_args(algo_type)[0]
+    assert isinstance(parameter, TypeVar)
+    assert parameter.__bound__ is not None
 
 
 @pytest.mark.parametrize("result_model", [FactorAnalysisResult, BacktestResult])
 def test_result_dataclasses_expose_generic_parameter_field(result_model):
     assert is_dataclass(result_model)
-    assert len(result_model.__type_params__) == 1
+    assert len(result_model.__parameters__) == 1
     assert "parameters" in {field.name for field in fields(result_model)}
     assert "parameters" not in result_model.filenames
     hints = get_type_hints(result_model)
-    assert get_args(hints["parameters"]) == (result_model.__type_params__[0], type(None))
+    assert get_args(hints["parameters"]) == (result_model.__parameters__[0], type(None))
     result = result_model(**{name: pd.DataFrame() for name in result_model.filenames})
     assert result.parameters is None

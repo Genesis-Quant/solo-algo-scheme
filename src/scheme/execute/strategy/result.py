@@ -1,14 +1,16 @@
 from dataclasses import dataclass, field
-from typing import ClassVar
+from typing import ClassVar, Generic, TypeVar
 
 import pandas as pd
 from pydantic import BaseModel
 
 from scheme.report.base import Report
 
+P = TypeVar("P", bound=BaseModel, infer_variance=True)
+
 
 @dataclass
-class BacktestResult[P: BaseModel](Report):
+class BacktestResult(Report, Generic[P]):
     report_kind: ClassVar[str] = "backtest"
     trade_details: pd.DataFrame
     daily_positions: pd.DataFrame

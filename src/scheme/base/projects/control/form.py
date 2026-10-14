@@ -1,6 +1,6 @@
 """Control 项目的回测报告表单。"""
 
-from typing import Literal
+from typing import Generic, Literal, TypeVar
 
 from pydantic import Field
 
@@ -10,8 +10,10 @@ from .params import ControlAnalysisParams
 
 __all__ = ["ControlReportForm"]
 
+P = TypeVar("P", bound=ControlAnalysisParams, infer_variance=True)
 
-class ControlReportForm[P: ControlAnalysisParams](BacktestForm[P]):
+
+class ControlReportForm(BacktestForm[P], Generic[P]):
     _analysis_base = ControlAnalysisParams
     _analysis_model = ControlAnalysisParams
 

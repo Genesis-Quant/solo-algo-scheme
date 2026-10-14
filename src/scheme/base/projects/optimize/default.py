@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 import numpy as np
 import pandas as pd
@@ -21,6 +21,8 @@ from scheme.log import get_logger
 __all__ = ["risk_parity", "OptimizeParams", "RiskParity"]
 
 log = get_logger("scheme.optimize")
+
+C = TypeVar("C", bound=ResearchContext[Any], infer_variance=True)
 
 
 def risk_parity(returns: pd.DataFrame) -> tuple[np.ndarray, str | None]:
@@ -58,7 +60,7 @@ class OptimizeParams(BaseOptimizeParams):
     gross_exposure: float = Field(default=0.98, gt=0, le=1)
 
 
-class RiskParity[C: ResearchContext[Any]](OptimizeAlgo[OptimizeParams, C]):
+class RiskParity(OptimizeAlgo[OptimizeParams, C], Generic[C]):
     def __init__(self, params: OptimizeParams | None = None) -> None:
         super().__init__(params or OptimizeParams())
 

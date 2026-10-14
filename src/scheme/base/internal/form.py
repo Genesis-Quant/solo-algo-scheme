@@ -9,6 +9,7 @@ from typing import (
     Annotated,
     Any,
     ClassVar,
+    Generic,
     Literal,
     TypeAliasType,
     TypeVar,
@@ -35,8 +36,10 @@ from scheme.data.dolphindb.universe import StockPool, Universe
 
 __all__ = ["ReportForm"]
 
+P = TypeVar("P", bound=BaseModel, infer_variance=True)
 
-class ReportForm[P: BaseModel](BaseModel, ABC):
+
+class ReportForm(BaseModel, ABC, Generic[P]):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     @abstractmethod
@@ -134,7 +137,7 @@ def _input_field(model: type[BaseModel], name: str, *, platform: bool):
     return copied
 
 
-class ResearchForm[P: BaseModel](ReportForm[P]):
+class ResearchForm(ReportForm[P], Generic[P]):
     """公共研究输入；具体类型绑定后展开项目声明的分析字段。"""
 
     _analysis_base: ClassVar[type[BaseModel] | None] = None
@@ -212,7 +215,8 @@ class ResearchForm[P: BaseModel](ReportForm[P]):
     @classmethod
     def analysis_model(cls) -> type[P]:
         if cls._analysis_model is None or (
-            cls.__dict__.get("__type_params__") and "_analysis_model" not in cls.__dict__
+            cls.__pydantic_generic_metadata__.get("parameters")
+            and "_analysis_model" not in cls.__dict__
         ):
             raise TypeError(f"{cls.__name__} 必须绑定具体分析参数类型")
         return cast(type[P], cls._analysis_model)
@@ -234,7 +238,7 @@ class ResearchForm[P: BaseModel](ReportForm[P]):
         return model.model_validate(values)
 
 
-class BacktestForm[P: BaseModel](ResearchForm[P]):
+class BacktestForm(ResearchForm[P], Generic[P]):
     """四类策略环节共享的行情、资金和费率输入。"""
 
     _supplied_fields: ClassVar[frozenset[str]] = frozenset({"universe", "config"})

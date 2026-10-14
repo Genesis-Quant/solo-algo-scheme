@@ -1,7 +1,7 @@
 """Model 项目的算法参数与回测分析参数。"""
 
 from datetime import date
-from typing import TYPE_CHECKING, Any, Literal, Self
+from typing import TYPE_CHECKING, Any, Literal, Self, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -16,6 +16,9 @@ if TYPE_CHECKING:
     from .algo import ModelAlgo
 
 __all__ = ["ModelParams", "ModelAnalysisParams"]
+
+P = TypeVar("P", bound="ModelParams")
+C = TypeVar("C", bound=ResearchContext[Any])
 
 
 class ModelParams(BaseModel):
@@ -61,7 +64,7 @@ class ModelAnalysisParams(ModelParams):
         self.symbols, self.benchmark = validate_backtest(self.config, self.symbols, self.benchmark)
         return self
 
-    def run[P: ModelParams, C: ResearchContext[Any]](
+    def run(
         self,
         algo: "type[ModelAlgo[P, C]]",
         *,

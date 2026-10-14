@@ -25,6 +25,7 @@ from scheme.base import (
     OptimizeAnalysisParams,
     ReportForm,
 )
+from scheme.base.internal.generic import generic_arguments
 
 
 def _form_key(model: type[BaseModel], name: str) -> str:
@@ -114,13 +115,14 @@ def _analysis_type(form: type[ReportForm], expected: type[BaseModel]) -> type[Ba
         if not issubclass(model, expected):
             raise ValueError(f"{form.__name__} 必须绑定 {expected.__name__} 或其分析子类")
         return model
-    for base in form.__mro__:
-        generic = base.__dict__.get("__pydantic_generic_metadata__", {})
-        if generic.get("origin") is ReportForm:
-            model = generic["args"][0]
-            if isinstance(model, type) and issubclass(model, expected):
-                return model
-            break
+    try:
+        args = generic_arguments(form, ReportForm)
+    except TypeError as error:
+        raise ValueError(
+            f"{form.__name__} 必须声明 ReportForm[{expected.__name__}] 或其分析子类"
+        ) from error
+    if args and isinstance(args[0], type) and issubclass(args[0], expected):
+        return args[0]
     raise ValueError(f"{form.__name__} 必须声明 ReportForm[{expected.__name__}] 或其分析子类")
 
 

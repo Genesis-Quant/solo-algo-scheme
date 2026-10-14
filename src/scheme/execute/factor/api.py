@@ -1,5 +1,6 @@
 from datetime import timedelta
 from time import perf_counter
+from typing import TypeVar
 
 import numpy as np
 import pandas as pd
@@ -14,6 +15,9 @@ from scheme.log import get_logger
 from .result import FactorAnalysisResult
 
 log = get_logger("scheme.factor")
+
+P = TypeVar("P", bound=FactorParams)
+A = TypeVar("A", bound=FactorAnalysisParams)
 
 
 def prepare_panel(panel: pd.DataFrame, parameters: FactorAnalysisParams) -> pd.DataFrame:
@@ -39,7 +43,7 @@ def prepare_panel(panel: pd.DataFrame, parameters: FactorAnalysisParams) -> pd.D
     return frame.sort_values(["time", "code"])
 
 
-def analyze_factors[P: FactorParams, A: FactorAnalysisParams](
+def analyze_factors(
     factor: Factor[P],
     parameters: A,
     *,

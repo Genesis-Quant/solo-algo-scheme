@@ -5,7 +5,7 @@ import sys
 from datetime import date
 from io import StringIO
 from types import ModuleType
-from typing import Annotated, Self, TypeVar
+from typing import Annotated, Generic, Self, TypeAlias, TypeVar
 
 import pytest
 from pydantic import (
@@ -260,13 +260,15 @@ def test_specialization_rejects_wrong_analysis_kind(target):
 
 
 def test_generic_intermediate_binding_and_unbound_rejection():
-    assert ModelReportForm[ModelReportForm.__type_params__[0]] is ModelReportForm
+    assert ModelReportForm[ModelReportForm.__parameters__[0]] is ModelReportForm
     assert ModelReportForm.analysis_model() is ModelAnalysisParams
 
     class Analysis(ModelAnalysisParams):
         window: int = 20
 
-    class Intermediate[P: ModelAnalysisParams](ModelReportForm[P]):
+    P = TypeVar("P", bound=ModelAnalysisParams)
+
+    class Intermediate(ModelReportForm[P], Generic[P]):
         pass
 
     class Concrete(Intermediate[Analysis]):
@@ -281,6 +283,68 @@ def test_generic_intermediate_binding_and_unbound_rejection():
         ModelReportForm[variable]().build()
     with pytest.raises(ValueError, match="FactorAnalysisParams"):
         _analysis_type(Concrete, FactorAnalysisParams)
+
+
+def test_handwritten_form_resolves_concrete_type_through_generic_intermediates():
+    P = TypeVar("P", bound=ModelAnalysisParams)
+
+    class Analysis(ModelAnalysisParams):
+        window: int = 20
+
+    class Intermediate(ReportForm[P], Generic[P]):
+        def build(self) -> P:
+            raise AssertionError("must not build")
+
+    class Forwarded(Intermediate[P], Generic[P]):
+        pass
+
+    class Concrete(Forwarded[Analysis]):
+        pass
+
+    class Leaf(Concrete):
+        pass
+
+    assert _analysis_type(ReportForm[Analysis], ModelAnalysisParams) is Analysis
+    assert _analysis_type(Concrete, ModelAnalysisParams) is Analysis
+    assert _analysis_type(Leaf, ModelAnalysisParams) is Analysis
+    with pytest.raises(ValueError, match="ModelAnalysisParams"):
+        _analysis_type(Intermediate, ModelAnalysisParams)
+    with pytest.raises(ValueError, match="FactorAnalysisParams"):
+        _analysis_type(Concrete, FactorAnalysisParams)
+
+
+@pytest.mark.parametrize("mixin_first", [True, False])
+def test_unparameterized_handwritten_form_mixin_does_not_hide_analysis(mixin_first):
+    class Analysis(ModelAnalysisParams):
+        window: int = 20
+
+    class FormMixin(ReportForm):
+        pass
+
+    bound = ReportForm[Analysis]
+    bases = (FormMixin, bound) if mixin_first else (bound, FormMixin)
+
+    class Concrete(*bases):
+        def build(self) -> Analysis:
+            raise AssertionError("must not build")
+
+    class Leaf(Concrete):
+        pass
+
+    assert _analysis_type(Concrete, ModelAnalysisParams) is Analysis
+    assert _analysis_type(Leaf, ModelAnalysisParams) is Analysis
+    with pytest.raises(ValueError, match="ModelAnalysisParams"):
+        _analysis_type(FormMixin, ModelAnalysisParams)
+
+
+def test_unrelated_unbound_form_typevar_is_not_hidden_by_inherited_analysis():
+    T = TypeVar("T")
+
+    class GenericForm(ModelReportForm[ModelAnalysisParams], Generic[T]):
+        pass
+
+    with pytest.raises(TypeError, match="绑定具体"):
+        GenericForm.analysis_model()
 
 
 def test_same_class_name_does_not_share_specialization_or_fields():
@@ -327,7 +391,7 @@ def test_annotated_conversions_execute_once_in_build_with_original_input_schema(
         annotation = list[Annotated[int, Field(gt=0), AfterValidator(convert)]]
         raw, expected = [3], [4]
     else:
-        type Window = Annotated[int, Field(gt=0), AfterValidator(convert)]
+        Window: TypeAlias = Annotated[int, Field(gt=0), AfterValidator(convert)]
         annotation = Window
     analysis = create_model("ConvertedAnalysis", __base__=ModelAnalysisParams, window=(annotation, ...))
     form_type = ModelReportForm[analysis]
@@ -428,7 +492,9 @@ def test_algorithm_strict_and_string_normalization_are_not_bypassed_by_form():
 
 
 def test_partial_generic_analysis_must_be_bound_before_generating_form():
-    class Analysis[T](ModelAnalysisParams):
+    T = TypeVar("T")
+
+    class Analysis(ModelAnalysisParams, Generic[T]):
         window: T
 
     for target in (Analysis, Analysis[TypeVar("T")]):

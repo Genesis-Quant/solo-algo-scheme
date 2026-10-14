@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from math import isfinite
 from time import perf_counter
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 import numpy as np
 import pandas as pd
@@ -21,6 +21,8 @@ __all__ = ["Backtest"]
 
 log = get_logger("scheme.backtest")
 
+C = TypeVar("C", bound=BaseModel, infer_variance=True)
+
 
 @dataclass
 class Progress:
@@ -34,7 +36,7 @@ class Progress:
     rejected: int = 0
 
 
-class Backtest[C: BaseModel](BaseBacktest[C]):
+class Backtest(BaseBacktest[C], Generic[C]):
     algos: tuple[Algo[Any, C], ...]
 
     @cached_property

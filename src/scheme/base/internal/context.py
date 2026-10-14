@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -8,8 +8,10 @@ from .types import Order, Signal, Target
 
 __all__ = ["ResearchContext"]
 
+T = TypeVar("T", infer_variance=True)
 
-class ResearchContext[T](BaseModel):
+
+class ResearchContext(BaseModel, Generic[T]):
     """T 由 Model 定义；环节间的结果消费后清空，长期状态由算法自身保存。"""
 
     model_config = ConfigDict(validate_assignment=True, allow_inf_nan=False)

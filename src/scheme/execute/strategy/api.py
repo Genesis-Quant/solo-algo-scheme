@@ -3,7 +3,7 @@ from datetime import timedelta
 from functools import cached_property
 from importlib.resources import files
 from time import perf_counter
-from typing import Any
+from typing import Any, Generic, TypeVar
 from uuid import uuid4
 
 import numpy as np
@@ -31,19 +31,23 @@ from .result import BacktestResult
 
 log = get_logger("scheme.backtest")
 
+BacktestC = TypeVar("BacktestC", bound=BaseModel, infer_variance=True)
+C = TypeVar("C", bound=ResearchContext[Any])
+A = TypeVar("A", bound=StrategyAnalysisParams)
+
 
 def _costs(config: dict[str, Any]) -> dict[str, float]:
     defaults = {"cash": 1_000_000.0, "commission": 0.0003, "tax": 0.0005}
     return {key: float(config.get(key, value)) for key, value in defaults.items()}
 
 
-class ResearchBacktest[C: BaseModel](Backtest[C]):
+class ResearchBacktest(Backtest[BacktestC], Generic[BacktestC]):
     def __init__(
         self,
         settings: DolphinSettings,
         parameters: StrategyAnalysisParams,
-        ctx: C,
-        algos: Sequence[Algo[Any, C]],
+        ctx: BacktestC,
+        algos: Sequence[Algo[Any, BacktestC]],
     ) -> None:
         self.settings = settings
         self.parameters = parameters
@@ -159,7 +163,7 @@ def records_frame(records: Sequence[BaseModel], model: type[BaseModel]) -> pd.Da
     return pd.DataFrame([row.model_dump() for row in records], columns=list(model.model_fields))
 
 
-def run_backtest[C: ResearchContext[Any], A: StrategyAnalysisParams](
+def run_backtest(
     algos: Sequence[Algo[Any, C]],
     ctx: C,
     parameters: A,
@@ -231,7 +235,7 @@ def _summarize(result: BacktestResult[Any], seconds: float) -> None:
         )
 
 
-def _run[C: ResearchContext[Any], A: StrategyAnalysisParams](
+def _run(
     algos: Sequence[Algo[Any, C]],
     ctx: C,
     parameters: A,

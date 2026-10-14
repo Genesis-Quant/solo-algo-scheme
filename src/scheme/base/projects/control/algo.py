@@ -1,7 +1,7 @@
 """ControlAlgo 研究项目基类。"""
 
 from abc import abstractmethod
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 import numpy as np
 import pandas as pd
@@ -15,8 +15,11 @@ from scheme.data.dolphindb.symbols import normalize_assets
 
 __all__ = ["ControlAlgo"]
 
+P = TypeVar("P", bound=BaseModel, infer_variance=True)
+C = TypeVar("C", bound=ResearchContext[Any], infer_variance=True)
 
-class ControlAlgo[P: BaseModel, C: ResearchContext[Any]](Algo[P, C]):
+
+class ControlAlgo(Algo[P, C], Generic[P, C]):
     def process(self) -> bool:
         target = self.ctx.target
         if target is None or self.ctx.orders is not None:

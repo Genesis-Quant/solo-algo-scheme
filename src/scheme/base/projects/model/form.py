@@ -1,6 +1,6 @@
 """Model 研究表单：回测设置与默认后续算法。"""
 
-from typing import Literal
+from typing import Generic, Literal, TypeVar
 
 from pydantic import Field
 
@@ -10,8 +10,10 @@ from .params import ModelAnalysisParams
 
 __all__ = ["ModelReportForm"]
 
+P = TypeVar("P", bound=ModelAnalysisParams, infer_variance=True)
 
-class ModelReportForm[P: ModelAnalysisParams](BacktestForm[P]):
+
+class ModelReportForm(BacktestForm[P], Generic[P]):
     _analysis_base = ModelAnalysisParams
     _analysis_model = ModelAnalysisParams
 

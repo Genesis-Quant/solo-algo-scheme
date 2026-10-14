@@ -1,6 +1,6 @@
 """Optimize 项目的回测报告表单。"""
 
-from typing import Literal
+from typing import Generic, Literal, TypeVar
 
 from pydantic import Field
 
@@ -10,8 +10,10 @@ from .params import OptimizeAnalysisParams
 
 __all__ = ["OptimizeReportForm"]
 
+P = TypeVar("P", bound=OptimizeAnalysisParams, infer_variance=True)
 
-class OptimizeReportForm[P: OptimizeAnalysisParams](BacktestForm[P]):
+
+class OptimizeReportForm(BacktestForm[P], Generic[P]):
     _analysis_base = OptimizeAnalysisParams
     _analysis_model = OptimizeAnalysisParams
 
