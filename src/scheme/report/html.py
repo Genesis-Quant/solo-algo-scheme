@@ -72,11 +72,8 @@ def report_html(
             )
         data["parameters"] = {
             "factor_columns": parameters.columns,
-            "return_columns": [f"return_{period}" for period in parameters.return_periods],
-            "return_specs": {
-                f"return_{period}": {"kind": "simple", "periods": period}
-                for period in parameters.return_periods
-            },
+            "return_columns": parameters.return_columns,
+            "return_specs": parameters.return_specs,
             "n_groups": parameters.groups,
             "n_select": parameters.n_select,
         }

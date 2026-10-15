@@ -223,19 +223,21 @@ def test_factor_form_defaults_match_web_research_settings():
     initial = defaults(FactorReportForm)
     assert initial == {
         "start": "2020-01-01", "end": "2027-01-01", "pool": StockPool.CSI300,
-        "return_periods": [1, 5, 20], "groups": 5,
+        "max_lag": 1, "groups": 5,
         "n_select": 10, "weight": "market_value", "calendar_symbol": "000300.XSHG",
     }
     assert FactorReportForm.model_fields["columns"].is_required()
     built = FactorReportForm(columns=["momentum"]).build()
-    assert built.return_periods == [1, 5, 20]
+    assert built.max_lag == 1
+    assert built.return_columns == ["r0o", "r1"]
     assert built.groups == 5
     assert built.n_select == 10
     assert built.weight == "market_value"
     assert built.calendar_symbol == "000300.XSHG"
-    first = FactorReportForm(columns=["momentum"])
-    first.return_periods.append(60)
-    assert FactorReportForm(columns=["momentum"]).return_periods == [1, 5, 20]
+    first = built.return_columns
+    first.append("r2")
+    assert built.return_columns == ["r0o", "r1"]
+    assert FactorReportForm(columns=["momentum"]).max_lag == 1
 
 
 @pytest.mark.parametrize("runtime,analysis,form,values", FORMS)
@@ -253,8 +255,8 @@ def test_form_cross_field_dates_are_validated_by_build_not_constructor(
     "updates,message",
     [
         ({"columns": ["f", "f"]}, "因子列不能重复"),
-        ({"return_periods": [1, 1]}, "收益持有期不能重复"),
-        ({"return_periods": [0]}, "正整数"),
+        ({"columns": ["r1"]}, "分析保留列重名"),
+        ({"columns": ["r1o"], "max_lag": 2}, "分析保留列重名"),
     ],
 )
 def test_factor_form_analysis_cross_field_validation_is_deferred(updates, message):

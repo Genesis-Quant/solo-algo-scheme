@@ -39,9 +39,7 @@ class FactorAnalysisParams(FactorParams):
     """因子参数加评价设置；填写后通过 run(Factor) 生成报告。"""
 
     columns: list[str] = Field(min_length=1, title="因子列")
-    return_periods: list[int] = Field(
-        default_factory=lambda: [1, 5, 20], min_length=1, title="收益持有期"
-    )
+    max_lag: int = Field(default=1, ge=1, strict=True, title="最大滞后阶数（交易日）")
     groups: int = Field(default=5, ge=2, title="分组数量")
     n_select: int = Field(default=10, ge=1, title="极端股票数")
     weight: Literal["equal", "market_value"] = Field(
@@ -55,11 +53,30 @@ class FactorAnalysisParams(FactorParams):
         self.calendar_symbol = engine_symbol(self.calendar_symbol)
         if len(set(self.columns)) != len(self.columns):
             raise ValueError("因子列不能重复")
-        if any(period < 1 for period in self.return_periods):
-            raise ValueError("收益持有期必须为正整数")
-        if len(set(self.return_periods)) != len(self.return_periods):
-            raise ValueError("收益持有期不能重复")
+        reserved = {
+            "date", "symbol", "time", "code", "circ_mv", "adjusted_open", "adjusted_close",
+            *self.return_columns,
+        }
+        if set(self.columns) & reserved:
+            raise ValueError("因子列不能与收益列或分析保留列重名")
         return self
+
+    @property
+    def return_columns(self) -> list[str]:
+        return [name for lag in range(1, self.max_lag + 1) for name in (f"r{lag - 1}o", f"r{lag}")]
+
+    @property
+    def return_specs(self) -> dict[str, dict[str, str | int]]:
+        specs = {}
+        for lag in range(1, self.max_lag + 1):
+            for name, offset, session in (
+                (f"r{lag - 1}o", lag - 1, "overnight"), (f"r{lag}", lag, "intraday"),
+            ):
+                specs[name] = {
+                    "kind": "simple", "periods": 1, "lag": offset,
+                    "session": session, "turnover_period": lag,
+                }
+        return specs
 
     def run(
         self, factor: "type[Factor[P]]", *, settings: "DolphinSettings | None" = None

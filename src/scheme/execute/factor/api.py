@@ -1,6 +1,6 @@
 from datetime import timedelta
 from time import perf_counter
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import numpy as np
 import pandas as pd
@@ -43,6 +43,40 @@ def prepare_panel(panel: pd.DataFrame, parameters: FactorAnalysisParams) -> pd.D
     return frame.sort_values(["time", "code"])
 
 
+def _return_derivatives(max_lag: int) -> dict[str, Any]:
+    def shifted(column: str, lag: int) -> str | dict[str, Any]:
+        if lag == 0:
+            return column
+        return {
+            "type": "TS", "op": "unary.shift",
+            "fields": {"col": column}, "params": {"periods": -lag},
+        }
+
+    derivatives: dict[str, Any] = {
+        f"adjusted_{price}": {
+            "type": "DIRECT", "op": "binary.mul",
+            "fields": {"left": price, "right": "adj_factor"},
+        }
+        for price in ("open", "close")
+    }
+    for lag in range(1, max_lag + 1):
+        for name, numerator, denominator in (
+            (f"r{lag - 1}o", shifted("adjusted_open", lag), shifted("adjusted_close", lag - 1)),
+            (f"r{lag}", shifted("adjusted_close", lag), shifted("adjusted_open", lag)),
+        ):
+            derivatives[name] = {
+                "type": "DIRECT", "op": "binary.sub",
+                "fields": {
+                    "left": {
+                        "type": "DIRECT", "op": "binary.div",
+                        "fields": {"left": numerator, "right": denominator},
+                    },
+                    "right": 1.0,
+                },
+            }
+    return derivatives
+
+
 def analyze_factors(
     factor: Factor[P],
     parameters: A,
@@ -52,9 +86,9 @@ def analyze_factors(
     settings = settings or DolphinSettings.from_env()
     started = perf_counter()
     log.info(
-        "因子分析：{} {} 至 {}（不含），因子列 {}，收益期 {}，{} 组，{}",
+        "因子分析：{} {} 至 {}（不含），因子列 {}，最大滞后 {}，隔夜/日内收益 {}，{} 组，{}",
         type(factor).__name__, parameters.start, parameters.end, ", ".join(parameters.columns),
-        parameters.return_periods, parameters.groups,
+        parameters.max_lag, ", ".join(parameters.return_columns), parameters.groups,
         "市值加权" if parameters.weight == "market_value" else "等权",
     )
     source = prepare_panel(factor.compute(parameters.start, parameters.end), parameters)
@@ -63,7 +97,7 @@ def analyze_factors(
         len(source), source.code.nunique(), source.time.nunique(), perf_counter() - started,
     )
     with create_session(settings) as session:
-        # 收益只读到结束日，与 Arena 一致：区间末尾不足持有期的收益为 NULL，不填零。
+        # 不扩展研究结束日；滞后价格按查询交易日轴位移，缺行情和超出区间均保留 NULL。
         with query(
             {
                 "start_date": parameters.start.isoformat(),
@@ -73,36 +107,7 @@ def analyze_factors(
                     | {source_symbol(parameters.calendar_symbol)}
                 ),
                 "factors": ["circ_mv"] if parameters.weight == "market_value" else [],
-                "derivatives": {
-                    "adjusted_close": {
-                        "type": "DIRECT",
-                        "op": "binary.mul",
-                        "fields": {"left": "close", "right": "adj_factor"},
-                    },
-                    **{
-                        f"return_{period}": {
-                            "type": "DIRECT",
-                            "op": "binary.sub",
-                            "fields": {
-                                "left": {
-                                    "type": "DIRECT",
-                                    "op": "binary.div",
-                                    "fields": {
-                                        "left": {
-                                            "type": "TS",
-                                            "op": "unary.shift",
-                                            "fields": {"col": "adjusted_close"},
-                                            "params": {"periods": -period},
-                                        },
-                                        "right": "adjusted_close",
-                                    },
-                                },
-                                "right": 1.0,
-                            },
-                        }
-                        for period in parameters.return_periods
-                    },
-                },
+                "derivatives": _return_derivatives(parameters.max_lag),
             },
             session=session,
         ) as result:
@@ -111,10 +116,8 @@ def analyze_factors(
                 {
                     "soloFactorSource": source,
                     "soloFactors": np.asarray(parameters.columns, dtype=str),
-                    "soloReturns": np.asarray(
-                        [f"return_{p}" for p in parameters.return_periods], dtype=str
-                    ),
-                    "soloPeriods": np.asarray(parameters.return_periods, dtype=np.int32),
+                    "soloReturns": np.asarray(parameters.return_columns, dtype=str),
+                    "soloPeriods": np.arange(1, parameters.max_lag + 1, dtype=np.int32),
                     "soloGroups": np.int32(parameters.groups),
                     "soloSelect": np.int32(parameters.n_select),
                     "soloMarketWeight": parameters.weight == "market_value",
@@ -130,7 +133,7 @@ def analyze_factors(
                 soloCalendar = exec time from {result.data_ref} where code = soloCalendarSymbol
                 if (size(soloCalendar) == 0) throw "缺少交易日历基准行情"
                 soloPrices = select * from {result.data_ref} where time in soloCalendar
-                soloPrices.dropColumns!(`adjusted_close)
+                soloPrices.dropColumns!(`adjusted_open`adjusted_close)
                 replaceColumn!(soloPrices, `time, timestamp(soloPrices.time))
                 replaceColumn!(soloFactorSource, `time, timestamp(soloFactorSource.time))
                 replaceColumn!(soloPrices, `code,

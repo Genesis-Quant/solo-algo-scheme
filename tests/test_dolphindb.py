@@ -274,7 +274,11 @@ def query_prices(prices: pd.DataFrame):
         validated = FactorQuery.model_validate(request)
         session.upload(
             {
-                "testPrices": prices,
+                "testPrices": prices[
+                    pd.to_datetime(prices.time).between(
+                        validated.start_date, validated.end_date, inclusive="both",
+                    )
+                ],
                 "testDefinitions": json.dumps(
                     {
                         name: node.model_dump(mode="json")
@@ -295,34 +299,38 @@ def query_prices(prices: pd.DataFrame):
 def test_real_factor_statistics(monkeypatch, tmp_path, weight):
     prices = pd.DataFrame(
         {
-            "time": np.repeat(pd.date_range("2025-01-02", periods=3), 2),
+            "time": np.repeat(pd.to_datetime(["2025-01-02", "2025-01-03", "2025-01-06"]), 2),
             "code": ["000001.SZ", "600000.SH"] * 3,
-            "close": [10.0, 10.0, 5.5, 12.0, 6.6, 13.2],
+            "open": [9.0, 9.0, 5.5, 12.0, 7.5, 15.4],
+            "close": [10.0, 10.0, 6.0, 14.0, 8.25, 18.2],
             "adj_factor": [1.0, 1.0, 2.0, 1.0, 2.0, 1.0],
             "circ_mv": [1.0, 3.0] * 3,
         }
     )
     monkeypatch.setattr("scheme.execute.factor.api.query", query_prices(prices))
     result = analyze_factors(
-        TestFactor(FactorParams(start="2025-01-02", end="2025-01-04")),
+        TestFactor(FactorParams(start="2025-01-02", end="2025-01-07")),
         FactorAnalysisParams(
             start="2025-01-02",
-            end="2025-01-04",
+            end="2025-01-07",
             columns=["score"],
-            return_periods=[1, 2],
+            max_lag=2,
             groups=2,
             n_select=1,
             calendar_symbol="000001.XSHE",
             weight=weight,
         ),
     )
-    assert result.information_coefficient.score_return_1_ic.tolist() == pytest.approx([1.0, 1.0])
-    assert result.group_returns.score_return_1_group0.tolist() == pytest.approx([0.1, 0.1])
+    assert result.information_coefficient.score_r0o_ic.tolist() == pytest.approx([1.0, 1.0])
+    assert result.group_returns.score_r0o_group0.tolist() == pytest.approx([0.1, 0.1])
     assert result.processed_data.score.tolist() == [1.0, 2.0, 2.0, 1.0]
     assert result.processed_data.score_group.tolist() == [0, 1, 1, 0]
-    assert result.processed_data.return_1.tolist() == pytest.approx([0.1, 0.2, 0.2, 0.1])
-    assert result.processed_data.return_2.iloc[:2].tolist() == pytest.approx([0.32, 0.32])
-    assert result.processed_data.return_2.iloc[2:].isna().all()
+    assert result.processed_data.r0o.tolist() == pytest.approx([0.1, 0.2, 0.25, 0.1])
+    assert result.processed_data.r1.tolist() == pytest.approx([12 / 11 - 1, 14 / 12 - 1, 0.1, 18.2 / 15.4 - 1])
+    assert result.processed_data.r1o.iloc[:2].tolist() == pytest.approx([0.25, 0.1])
+    assert result.processed_data.r2.iloc[:2].tolist() == pytest.approx([0.1, 18.2 / 15.4 - 1])
+    assert result.processed_data[["r1o", "r2"]].iloc[2:].isna().all().all()
+    assert set(result.group_turnover.periods) == {1, 2}
     assert result.execution_statistics.source_count.tolist() == [2, 2]
     assert result.execution_statistics.filtered_count.tolist() == [2, 2]
     assert result.processed_data.circ_mv.tolist() == (
@@ -338,6 +346,7 @@ def test_real_market_weight_checks_only_valid_factor_rows(monkeypatch, missing_c
         {
             "time": np.repeat(pd.date_range("2025-01-02", periods=3), 3),
             "code": ["000001.SZ", "000002.SZ", "600000.SH"] * 3,
+            "open": [9.0, 8.0, 9.0, 5.0, 8.0, 11.0, 6.0, 8.0, 12.0],
             "close": [10.0, 8.0, 10.0, 5.5, 8.0, 12.0, 6.6, 8.0, 13.2],
             "adj_factor": [1.0, 1.0, 1.0, 2.0, 1.0, 1.0, 2.0, 1.0, 1.0],
             "circ_mv": [1.0, 2.0, 3.0] * 3,
@@ -349,7 +358,7 @@ def test_real_market_weight_checks_only_valid_factor_rows(monkeypatch, missing_c
         start="2025-01-02",
         end="2025-01-04",
         columns=["score"],
-        return_periods=[1],
+        max_lag=1,
         groups=2,
         n_select=1,
         calendar_symbol="000001.XSHE",
@@ -374,7 +383,7 @@ def test_real_factor_query_pipeline():
             start="2026-06-01",
             end="2026-06-03",
             columns=["score"],
-            return_periods=[1, 5],
+            max_lag=2,
             groups=2,
             n_select=1,
         ),
@@ -382,12 +391,56 @@ def test_real_factor_query_pipeline():
     frame = result.processed_data
     assert frame.score.tolist() == [1.0, 2.0, 2.0, 1.0]
     assert frame.score_group.tolist() == [0, 1, 1, 0]
-    # 收益只读到结束日：最后一个交易日没有 1 日收益，两天的区间也没有 5 日收益。
     first = frame.time == frame.time.min()
-    assert frame.loc[first, "return_1"].notna().all()
-    assert frame.loc[~first, "return_1"].isna().all()
-    assert frame.return_5.isna().all()
+    assert frame.loc[first, ["r0o", "r1"]].notna().all().all()
+    assert frame.loc[~first, ["r0o", "r1"]].isna().all().all()
+    assert frame[["r1o", "r2"]].isna().all().all()
     assert result.execution_statistics.retention_rate.tolist() == [1.0, 1.0]
+
+
+def test_real_segment_returns_keep_missing_prices_sparse_factor_dates_and_end_boundary(monkeypatch):
+    days = pd.to_datetime(["2025-01-03", "2025-01-06", "2025-01-07", "2025-01-08", "2025-01-09"])
+    prices = pd.DataFrame({
+        "time": np.repeat(days, 2),
+        "code": ["000001.SZ", "600000.SH"] * 5,
+        "open": [9.0, 18.0, np.nan, 22.0, 6.0, 13.0, 7.5, 16.5, 999.0, 999.0],
+        "close": [10.0, 20.0, np.nan, 24.0, 7.0, 15.0, 8.25, 18.0, 1000.0, 1000.0],
+        "adj_factor": [1.0] * 4 + [2.0] * 6,
+    })
+
+    class SparseDates(Factor[FactorParams]):
+        def compute(self, start: date, end: date) -> pd.DataFrame:
+            index = pd.MultiIndex.from_product(
+                [days[[0, 2, 3]], ["000001.XSHE", "600000.XSHG"]],
+                names=["date", "symbol"],
+            )
+            return pd.DataFrame({"score": [1.0, 2.0, 2.0, 1.0, 1.0, 2.0]}, index=index)
+
+    monkeypatch.setattr("scheme.execute.factor.api.query", query_prices(prices))
+    params = FactorAnalysisParams(
+        start="2025-01-03", end="2025-01-09", columns=["score"], max_lag=2,
+        groups=2, n_select=1, calendar_symbol="600000.XSHG",
+    )
+    result = analyze_factors(SparseDates(FactorParams(**{
+        name: getattr(params, name) for name in ("start", "end", "universe")
+    })), params)
+    frame = result.processed_data.set_index(["code", "time"])
+    assert len(frame) == 6
+    first = frame.loc[("000001.XSHE", days[0])]
+    assert first[["r0o", "r1", "r1o"]].isna().all()
+    assert first.r2 == pytest.approx(14 / 12 - 1)
+    other = frame.loc[("600000.XSHG", days[0])]
+    assert other[params.return_columns].tolist() == pytest.approx([
+        22 / 20 - 1, 24 / 22 - 1, 26 / 24 - 1, 30 / 26 - 1,
+    ])
+    for code in ("000001.XSHE", "600000.XSHG"):
+        penultimate = frame.loc[(code, days[2])]
+        assert penultimate[["r0o", "r1"]].notna().all()
+        assert penultimate[["r1o", "r2"]].isna().all()
+        assert frame.loc[(code, days[3]), params.return_columns].isna().all()
+    assert frame.loc[("000001.XSHE", days[2]), "r0o"] == pytest.approx(15 / 14 - 1)
+    assert frame.loc[("000001.XSHE", days[2]), "r1"] == pytest.approx(0.1)
+    assert set(result.group_turnover.periods) == {1, 2}
 
 
 @pytest.mark.parametrize("pool,weight,size", [

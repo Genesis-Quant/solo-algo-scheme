@@ -100,7 +100,7 @@ def settings():
 
 
 def test_factor_preserves_panel_values():
-    parameters = FactorAnalysisParams(**DATES, columns=["f"], return_periods=[1], groups=2)
+    parameters = FactorAnalysisParams(**DATES, columns=["f"], max_lag=1, groups=2)
     panel = ExampleFactor(FactorParams(**DATES)).compute(parameters.start, parameters.end)
     source = prepare_panel(panel, parameters)
     assert source.f.tolist() == [1.0, 2.0]
@@ -126,8 +126,8 @@ def test_factor_panel_uses_half_open_dates(day):
         prepare_panel(panel, params)
 
 
-@pytest.mark.parametrize("periods", [[1], [1, 5, 20], [60]])
-def test_factor_returns_are_read_only_until_end(monkeypatch, settings, periods):
+@pytest.mark.parametrize("max_lag", [1, 2, 5])
+def test_factor_returns_are_read_only_until_end(monkeypatch, settings, max_lag):
     requests = []
 
     class Stop(Exception):
@@ -139,16 +139,20 @@ def test_factor_returns_are_read_only_until_end(monkeypatch, settings, periods):
 
     monkeypatch.setattr("scheme.execute.factor.api.query", capture)
     monkeypatch.setattr("scheme.execute.factor.api.create_session", lambda _: nullcontext(object()))
-    params = FactorAnalysisParams(**DATES, columns=["f"], return_periods=periods)
+    params = FactorAnalysisParams(**DATES, columns=["f"], max_lag=max_lag)
     with pytest.raises(Stop):
         analyze_factors(ExampleFactor(FactorParams(**DATES)), params, settings=settings)
-    # 与 Arena 相同：不读取结束日之后的行情，持有期长短不改变读取区间。
     assert (requests[0]["start_date"], requests[0]["end_date"]) == ("2025-01-01", "2025-01-02")
+    assert list(requests[0]["derivatives"]) == ["adjusted_open", "adjusted_close", *params.return_columns]
+    from runtime.apps.query import FactorQuery
+
+    validated = FactorQuery.model_validate(requests[0])
+    assert set(validated.source_factors()) == {"open", "close", "adj_factor"}
 
 
 def test_factor_report_form_build_and_run(monkeypatch, settings):
     form = FactorReportForm(
-        **DATES, columns=["f"], pool=StockPool.CSI300, groups=3, return_periods=[1, 5],
+        **DATES, columns=["f"], pool=StockPool.CSI300, groups=3, max_lag=2,
     )
     params = form.build()
     assert_type(params, FactorAnalysisParams)

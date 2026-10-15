@@ -48,7 +48,7 @@ scheme/
 参数按三层职责组织：
 
 - `FactorParams`、`StrategyParams` 是构造因子和组装策略需要的运行参数，包含 `start`、`end`、`universe`。四类 Algo 的 Params 只声明自身算法字段，从统一策略参数提取，不携带回测配置。
-- `FactorAnalysisParams(FactorParams)` 增加 `columns`、`return_periods` 等分析选项，`StrategyAnalysisParams(StrategyParams)` 增加行情、基准和回测引擎设置；都实现 `run` 并返回报告。各环节的 `Model/Optimize/Control/ExecutionAnalysisParams` 直接继承对应的 Algo Params，增加独立研究所需的日期、股票池、回测设置和上游选择。
+- `FactorAnalysisParams(FactorParams)` 增加 `columns`、`max_lag` 等分析选项，`StrategyAnalysisParams(StrategyParams)` 增加行情、基准和回测引擎设置；都实现 `run` 并返回报告。各环节的 `Model/Optimize/Control/ExecutionAnalysisParams` 直接继承对应的 Algo Params，增加独立研究所需的日期、股票池、回测设置和上游选择。
 - 五类公共 Form 由 Scheme 提供，项目只绑定自己的 AnalysisParams。`start/end/pool` 统一定义；四类策略环节还共享行情、基准、资金和费率。Scheme 负责 `pool → Universe`、资金费率 → `config` 以及 `build()`，不执行研究。
 
 项目自定义 AnalysisParams 同时继承本项目的具体 Params 与对应 Scheme AnalysisParams；算法字段只在 Params 声明一次。公共 Form 会自动读取具体 AnalysisParams 的字段、默认值、约束和 JSON Schema 元数据，`build()` 返回该具体类型，并执行它的字段及跨字段校验。运行时根据 Factor/Algo 的参数泛型构造新的具体 Params，只传算法声明的字段，不把分析字段泄漏给算法。
@@ -300,7 +300,7 @@ from scheme.execute.strategy import StrategyAnalysisParams, run_backtest
 
 form = FactorReportForm(
     start="2025-01-01", end="2026-01-01", columns=["momentum"],
-    pool=StockPool.CSI300,
+    pool=StockPool.CSI300, max_lag=2,
 )
 params = form.build()
 report = params.run(Factor)  # 传入项目的 Factor 类，自动构造 FactorParams。
@@ -344,12 +344,20 @@ snapshot 模式接收 Arena StockSnapshot 的 Market、SecurityID、TradeDate、
 可通过 `DOLPHIN_SNAPSHOT_DATABASE`、`DOLPHIN_SNAPSHOT_TABLE` 指定同结构表。
 其他原始格式需继承 ResearchBacktest 实现 load_messages。
 
-因子收益通过 Arena query DSL 在 DolphinDB 中计算：复权收盘价 shift(-N) / 当日复权收盘价 - 1，按交易日轴对齐，不重复处理 Factor 的预处理。
-Factor 面板上传后，在同一 DolphinDB 会话内拼接收益率、过滤空值、生成分组并调用 Arena factor 模块计算报告；Python 只下载最终报告表。
-默认等权分组，market_value 使用 circ_mv；只生成分组标签，不修改因子值。
-收益只读取到结束日为止，与 Arena 相同：不读取结束日之后的行情，区间最后 N 个交易日的 N 日收益为空，不填零；
-这些交易日仍保留因子、分组和换手率，只是不产生 IC 与分组收益。
-评价交易日轴由 calendar_symbol（默认沪深300）行情确定，缺少基准数据报错。
+因子检验通过 `max_lag` 输入最大滞后阶数（严格正整数，默认 1），生成 `2N` 个按时间顺序排列的隔夜与日内收益字段。所有字段与 t 日因子配对；最大滞后 N 涉及 t 至 t+N，共 N+1 个交易日的行情，不是累计持有收益。N=2 时：
+
+| 字段 | 时段 | 简单收益公式 |
+| --- | --- | --- |
+| `r0o` | t 收盘 → t+1 开盘 | `O(t+1) / C(t) - 1` |
+| `r1` | t+1 开盘 → t+1 收盘 | `C(t+1) / O(t+1) - 1` |
+| `r1o` | t+1 收盘 → t+2 开盘 | `O(t+2) / C(t+1) - 1` |
+| `r2` | t+2 开盘 → t+2 收盘 | `C(t+2) / O(t+2) - 1` |
+
+O、C 分别为 `open * adj_factor`、`close * adj_factor`；收益通过 Arena query DSL 在 DolphinDB 中按完整查询交易日轴计算，不能在已筛选或稀疏的因子面板上位移，也不能跳过缺行情寻找下一条非空价格。`o` 表示隔夜段。
+Factor 面板上传后，在同一 DolphinDB 会话内拼接收益率、过滤因子空值、生成分组并调用 Arena factor 模块计算报告；不重复处理 Factor 的预处理。默认等权，market_value 使用 circ_mv；只生成分组标签，不修改因子值。
+行情仍只读取 `[start,end)`，最大滞后不会扩展查询结束日；不足未来 k 个交易日时，`r{k-1}o` 与 `r{k}` 为 NULL，不填零。收盘缺失可能只影响日内段，不能因为某个标签为空就删除其它可评价标签；这些行仍保留因子、分组及换手。
+报告为每段收益记录 `kind=simple, periods=1`，另标明 lag 和 overnight/intraday；不能将字段中的阶数当成持有期。换手独立比较因子分组在 1..N 个交易日间隔下的变化，不等同实际成交换手。
+旧 `return_periods` 不会被自动解释成新滞后参数，旧保存报告由原有收益规格解释，不改写历史文件。评价交易日轴由 calendar_symbol（默认沪深300）行情确定，缺少基准数据报错。
 未来收益只进入评价，不能传给 Model。默认风险平价缺少历史样本或求解失败时退化等权并记录原因。
 
 策略回测驱动初始化正序，每次事件先逆序触发回调，再正序调用各环节 process，重复直到没有可消费的消息。Context 变化不伪造事件回调。
