@@ -19,7 +19,6 @@ class Package(StrictModel):
     package: str
     version: str
     wheel: str
-    sha256: str = Field(pattern=r"^[a-fA-F0-9]{64}$")
     entry: str = Field(pattern=r"^[A-Za-z_][\w.]*:[A-Za-z_]\w*$")
 
 

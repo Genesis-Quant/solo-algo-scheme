@@ -446,13 +446,37 @@ def test_secondary_aliases_cannot_capture_platform_values(alias):
         ModelReportForm[Analysis]
 
 
-@pytest.mark.parametrize("name", ["window", "config"])
-def test_data_dependent_factories_are_rejected_before_schema_discovery(name):
-    annotation = dict if name == "config" else int
-    field = Field(default_factory=lambda data: {"start": data["start"]} if name == "config" else 20)
-    analysis = create_model("DerivedAnalysis", __base__=ModelAnalysisParams, **{name: (annotation, field)})
-    with pytest.raises(TypeError, match="default_factory.*model_validator"):
-        ModelReportForm[analysis]
+def test_data_dependent_factories_use_preceding_fields():
+    class Analysis(ModelAnalysisParams):
+        window: int = Field(default_factory=lambda data: data["batch_days"] * 2)
+
+    form_type = ModelReportForm[Analysis]
+    initial = defaults(form_type)
+    assert "window" not in initial
+    assert form_type.model_validate(initial).build().window == 2
+    assert form_type(batch_days=3).build().window == 6
+    assert form_type(batch_days=3, window=9).build().window == 9
+
+
+def test_data_dependent_factory_waits_for_required_input():
+    class Analysis(ModelAnalysisParams):
+        window: int
+        doubled: int = Field(default_factory=lambda data: data["window"] * 2)
+
+    form_type = ModelReportForm[Analysis]
+    initial = defaults(form_type)
+    assert not {"window", "doubled"} & initial.keys()
+    assert form_type(**initial, window=7).build().doubled == 14
+
+
+def test_data_dependent_config_factory_keeps_form_cash_and_fees():
+    class Analysis(ModelAnalysisParams):
+        config: dict = Field(default_factory=lambda data: {"project_start": data["start"]})
+
+    built = ModelReportForm[Analysis](start="2025-01-01", cash=50_000).build()
+    assert built.config == {
+        "project_start": date(2025, 1, 1), "cash": 50_000, "commission": 0.0003, "tax": 0.0005,
+    }
 
 
 @pytest.mark.parametrize("mode", ["before", "plain", "wrap"])
@@ -616,5 +640,5 @@ def test_real_cli_and_factor_freeze_keep_the_existing_wire_contract(tmp_path, mo
     assert "window" not in payload["analysis"]
     assert payload["factor"]["universe"] == payload["analysis"]["universe"] == {"pool": "中证 500"}
     assert Form.model_validate(values).build().universe.pool == StockPool.CSI500
-    with pytest.raises(ValueError, match="未声明字段"):
+    with pytest.raises(ValidationError, match="extra_forbidden"):
         inspect_project(tmp_path, {"form": {**values, "window": 6}})

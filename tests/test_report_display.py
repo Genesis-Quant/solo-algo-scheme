@@ -4,6 +4,7 @@ import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
+import pandas as pd
 import pytest
 
 from scheme.report.base import Report
@@ -118,3 +119,30 @@ def test_to_html_still_uses_standalone_html_without_ipython(monkeypatch, options
 
     render.assert_called_once_with(report, **expected)
     assert render.call_args.args[0] is report
+
+
+@pytest.mark.parametrize("height", [0.5, 1, 125.5])
+def test_notebook_iframe_accepts_any_positive_integer_or_float_height(monkeypatch, height):
+    from importlib import import_module
+
+    module = import_module("scheme.report.html")
+    monkeypatch.setattr(module, "report_html", lambda *args, **kwargs: "<p>report</p>")
+    iframe = module.notebook_html(Report(), height=height)
+    assert f"height:{height}px" in iframe
+
+
+@pytest.mark.parametrize("height", [True, False, 0, -1, -0.5, float("nan"), "100"])
+def test_notebook_iframe_requires_a_positive_numeric_height(height):
+    from scheme.report.html import notebook_html
+
+    with pytest.raises(ValueError, match="height 必须为正数"):
+        notebook_html(Report(), height=height)
+
+
+def test_preview_supports_negative_rows_like_dataframe_head():
+    class TableReport(Report):
+        filenames = {"data": "data.parquet"}
+
+    report = TableReport()
+    report.data = pd.DataFrame({"value": [1, 2, 3]})
+    pd.testing.assert_frame_equal(report.preview("data", rows=-1), report.data.head(-1))

@@ -1,7 +1,6 @@
 """任务环境中的研究入口，接口由对应版本的 scheme 负责。"""
 
 import argparse
-import hashlib
 import json
 import sys
 from importlib import import_module
@@ -35,8 +34,7 @@ def main(argv: list[str] | None = None) -> int:
         if arguments.input is None or arguments.output is None:
             raise ValueError("run 需要 --input 和 --output")
         input_file = arguments.input.resolve()
-        source = input_file.read_bytes()
-        data = json.loads(source)
+        data = json.loads(input_file.read_text(encoding="utf-8"))
         kind = data["kind"]
         if kind not in TASK_KINDS:
             raise ValueError(f"不支持的研究类型：{kind}")
@@ -44,18 +42,9 @@ def main(argv: list[str] | None = None) -> int:
         if output != arguments.output.resolve():
             raise ValueError("输出目录与 input.output 不一致")
         data["output"] = str(output)
-        data["environment"]["lockfile"] = str(
-            (input_file.parent / data["environment"]["lockfile"]).resolve()
-        )
-        components = [data["factor"]] if kind == "factor" else data["algos"].values()
-        for component in components:
-            if component is not None and not component["wheel"].startswith("https://"):
-                component["wheel"] = str((input_file.parent / component["wheel"]).resolve())
         started = perf_counter()
         log.info("正式任务开始：{}，输入 {}", kind, input_file)
-        code = import_module(f"scheme.execute.{kind}.task").run(
-            data, input_sha256=hashlib.sha256(source).hexdigest()
-        )
+        code = import_module(f"scheme.execute.{kind}.task").run(data)
         log.info("正式任务完成：{}，用时 {}", kind, duration(perf_counter() - started))
         return code
     except Exception as error:

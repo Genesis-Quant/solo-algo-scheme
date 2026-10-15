@@ -1,7 +1,7 @@
 from importlib.metadata import distribution
 
 from scheme.base import Algo, ResearchContext
-from scheme.execute.packages import load_component, load_entry, validate_environment
+from scheme.execute.packages import installed_versions, load_component, load_entry
 from scheme.execute.results import check_output, save_run
 from scheme.execute.schema import AlgoTask
 from scheme.execute.strategy import run_backtest
@@ -11,10 +11,10 @@ from scheme.log import get_logger
 log = get_logger("scheme.task")
 
 
-def run(task: AlgoTask, *, input_sha256: str) -> int:
+def run(task: AlgoTask) -> int:
     """当前五种 Algo/策略任务共用的回测报告实现，由各自任务入口调用。"""
     check_output(task)
-    versions = validate_environment(task.environment)
+    versions = installed_versions()
     algos = {}
     for name in type(task.algos).model_fields:
         component = getattr(task.algos, name)
@@ -30,5 +30,5 @@ def run(task: AlgoTask, *, input_sha256: str) -> int:
         raise TypeError("Context 必须继承当前 scheme 的 ResearchContext")
     strategy = Strategy(context(), params=task.backtest, **algos)
     result = run_backtest(strategy.algos, strategy.ctx, task.backtest)
-    save_run(task, result, versions, input_sha256=input_sha256)
+    save_run(task, result, versions)
     return 0

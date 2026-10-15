@@ -101,7 +101,7 @@ def run_research(
     from scheme.base.projects.optimize.default import RiskParity
 
     from .api import run_backtest
-    from .assembly import context_type, parameter_type, project_parameters, validate_context
+    from .assembly import context_type, parameter_type, project_parameters
 
     components = research_components(params, kind, current)
     defaults = {
@@ -118,8 +118,6 @@ def run_research(
     context = ctx if ctx is not None else context_type(components["model"])()
     backtest = StrategyAnalysisParams.model_validate(dict(params))
     algos = tuple(cls(project_parameters(parameter_type(cls), params)) for cls in components.values())
-    for algo in algos:
-        validate_context(algo, context)
     result = cast("BacktestResult[A]", run_backtest(algos, context, backtest, settings=settings))
     result.parameters = params.model_copy(deep=True)
     return result

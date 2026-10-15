@@ -79,13 +79,20 @@ def test_old_holding_periods_are_not_reinterpreted_as_lags(model):
         model(**DATES, columns=["score"], return_periods=[1, 5, 20])
 
 
-@pytest.mark.parametrize("column", ["r0o", "r1", "r1o", "r2", "time", "code", "date", "symbol", "circ_mv", "adjusted_open", "adjusted_close"])
+@pytest.mark.parametrize("column", ["r0o", "r1", "r1o", "r2", "time", "code", "date", "symbol", "circ_mv"])
 def test_factor_columns_cannot_shadow_generated_or_join_columns(column):
     with pytest.raises(ValidationError, match="重名"):
         FactorAnalysisParams(**DATES, columns=[column], max_lag=2)
     form = FactorReportForm(**DATES, columns=[column], max_lag=2)
     with pytest.raises(ValidationError, match="重名"):
         form.build()
+
+
+@pytest.mark.parametrize("column", ["adjusted_open", "adjusted_close"])
+def test_factor_columns_may_use_price_intermediate_names(column):
+    params = FactorAnalysisParams(**DATES, columns=[column])
+    assert params.columns == [column]
+    assert FactorReportForm(**DATES, columns=[column]).build().columns == [column]
 
 
 def test_lag_two_uses_three_trading_days_and_adj_factors_not_two_day_holding_return():
@@ -144,7 +151,7 @@ def test_factor_task_serializes_max_lag_but_not_derived_metadata(tmp_path):
     task = FactorTask.model_validate({
         "environment": {"lockfile": str(tmp_path / "uv.lock")}, "output": str(tmp_path / "output"),
         "factor": {"package": "factor-test", "version": "1.0.0", "wheel": "test.whl",
-                   "sha256": "a" * 64, "entry": "factor_test:Factor"},
+                   "entry": "factor_test:Factor"},
         "analysis": params.model_dump(mode="json"),
     })
     assert task.analysis.return_columns == ["r0o", "r1", "r1o", "r2"]

@@ -102,7 +102,7 @@ def defaults(model: type[BaseModel]) -> dict[str, Any]:
     return {
         wire[name]: _form_value(spec.get_default(call_default_factory=True), spec.annotation)
         for name, spec in model.model_fields.items()
-        if not spec.is_required()
+        if not spec.is_required() and not spec.default_factory_takes_validated_data
     }
 
 
@@ -157,11 +157,8 @@ def inspect_project(directory: Path, values: dict | None = None) -> dict:
     if not isinstance(form_type, type) or not issubclass(form_type, ReportForm):
         raise ValueError(f"{form_name} 必须继承 ReportForm")
     analysis_type = _analysis_type(form_type, expected_analysis)
-    schema, wire = _form_schema(form_type)
+    schema, _ = _form_schema(form_type)
     if values is not None:
-        unknown = set(values["form"]) - set(wire.values())
-        if unknown:
-            raise ValueError(f"{form_name} 包含未声明字段：{sorted(unknown)}")
         analysis = form_type.model_validate(values["form"]).build()
         if not isinstance(analysis, analysis_type):
             raise ValueError(f"{form_name}.build() 必须返回 {analysis_type.__name__}")

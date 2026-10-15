@@ -2,7 +2,7 @@ from typing import Any
 
 from scheme.base import Factor
 from scheme.execute.factor.api import analyze_factors
-from scheme.execute.packages import load_component, validate_environment
+from scheme.execute.packages import installed_versions, load_component
 from scheme.execute.results import check_output, save_run
 from scheme.execute.schema import FactorTask
 from scheme.execute.strategy.assembly import parameter_type, project_parameters
@@ -11,15 +11,15 @@ from scheme.log import get_logger
 log = get_logger("scheme.task")
 
 
-def run(data: dict[str, Any], *, input_sha256: str) -> int:
+def run(data: dict[str, Any]) -> int:
     task = FactorTask.model_validate(data)
     check_output(task)
-    versions = validate_environment(task.environment)
+    versions = installed_versions()
     factor = load_component(task.factor, Factor)
     log.info("加载因子：{} {}（{}）", task.factor.package, task.factor.version, task.factor.entry)
     shared = {name: getattr(task.analysis, name) for name in ("start", "end", "universe")}
     params = project_parameters(parameter_type(factor), task.factor.params, overrides=shared)
     task.factor.params = params.model_dump(mode="json")
     result = analyze_factors(factor(params), task.analysis)
-    save_run(task, result, versions, input_sha256=input_sha256)
+    save_run(task, result, versions)
     return 0

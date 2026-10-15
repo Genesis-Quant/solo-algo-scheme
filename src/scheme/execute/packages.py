@@ -1,16 +1,9 @@
 """包身份、锁定版本和类入口校验；不在已运行的 Kernel 中安装依赖。"""
 
-import hashlib
 import importlib
 import importlib.metadata as metadata
-import json
 import re
-import tempfile
-import tomllib
-from pathlib import Path
 from typing import Any
-from urllib.request import urlopen
-from zipfile import ZipFile
 
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
@@ -19,56 +12,15 @@ from packaging.version import Version
 from scheme.execute.strategy.assembly import parameter_type
 from scheme.log import get_logger
 
-from .schema import Component, Environment, Package
+from .schema import Component, Package
 
 log = get_logger("scheme.task")
 
 
-def validate_environment(environment: Environment) -> dict[str, str]:
-    lock = tomllib.loads(environment.lockfile.read_text(encoding="utf-8"))
-    packages = lock.get("package", [])
-    if any({"editable", "directory"} & p.get("source", {}).keys() for p in packages):
-        raise ValueError("正式任务锁文件不能包含可变源码目录")
-    candidates: dict[str, set[str]] = {}
-    for package in packages:
-        candidates.setdefault(canonicalize_name(package["name"]), set()).add(package["version"])
-    actual = {canonicalize_name(d.metadata["Name"]): d.version for d in metadata.distributions()}
-    for name, version in actual.items():
-        if version not in candidates.get(name, set()):
-            raise ValueError(f"环境中的 {name}=={version} 不在任务锁文件中")
-    # 检查实际生效的传递依赖，不要求安装锁文件中其他平台或未启用 extra 的包。
-    for distribution in metadata.distributions():
-        for text in distribution.requires or []:
-            requirement = Requirement(text)
-            if requirement.marker and not requirement.marker.evaluate():
-                continue
-            name = canonicalize_name(requirement.name)
-            if name not in actual or (
-                requirement.specifier and actual[name] not in requirement.specifier
-            ):
-                raise ValueError(f"{distribution.metadata['Name']} 的依赖不满足：{text}")
-            if requirement.url and requirement.url.startswith("git+"):
-                direct = json.loads(
-                    metadata.distribution(name).read_text("direct_url.json") or "{}"
-                )
-                revision = requirement.url.rsplit("@", 1)[-1]
-                vcs = direct.get("vcs_info", {})
-                commits = {
-                    p.get("source", {}).get("git", "").rsplit("#", 1)[-1]
-                    for p in packages
-                    if canonicalize_name(p["name"]) == name
-                }
-                if vcs.get("commit_id") not in commits or revision not in {
-                    vcs.get("commit_id"),
-                    vcs.get("requested_revision"),
-                }:
-                    raise ValueError(f"{name} Git commit 与依赖声明不一致")
-    log.info(
-        "任务环境与锁文件一致：{} 个包，scheme {}，backtest {}，arena-runtime {}", len(actual),
-        actual.get("scheme", "-"), actual.get("backtest", "-"), actual.get("arena-runtime", "-"),
-    )
-    log.debug("任务环境：{}", "，".join(f"{name} {version}" for name, version in sorted(actual.items())))
-    return actual
+def installed_versions() -> dict[str, str]:
+    versions = {canonicalize_name(d.metadata["Name"]): d.version for d in metadata.distributions()}
+    log.debug("任务环境：{}", "，".join(f"{name} {version}" for name, version in sorted(versions.items())))
+    return versions
 
 
 def validate_scheme_requirement(
@@ -102,8 +54,6 @@ def validate_scheme_requirement(
             or Version(bounds[">="]) != Version(f"{version.major}.{version.minor}.0")
             or Version(bounds["<"]) != Version(f"{version.major}.{version.minor + 1}.0")):
         raise ValueError(message)
-    if version not in requirement.specifier:
-        raise ValueError(f"实际 scheme {version} 不满足研究包依赖：{requirement}")
 
 
 def verify_component(component: Package) -> metadata.Distribution:
@@ -112,30 +62,6 @@ def verify_component(component: Package) -> metadata.Distribution:
         raise ValueError(f"{component.package} 实际安装版本不是 {component.version}")
     scheme = Version(metadata.version("scheme"))
     validate_scheme_requirement(distribution.requires or [], scheme, Version(component.version))
-    with tempfile.TemporaryDirectory(prefix="solo-wheel-") as temporary:
-        path = Path(temporary) / "component.whl"
-        if component.wheel.startswith("https://"):
-            with urlopen(component.wheel, timeout=60) as response, path.open("wb") as stream:
-                while chunk := response.read(1024 * 1024):
-                    stream.write(chunk)
-        else:
-            path = Path(component.wheel)
-        with path.open("rb") as stream:
-            if hashlib.file_digest(stream, "sha256").hexdigest() != component.sha256.lower():
-                raise ValueError("wheel SHA256 不一致")
-        with ZipFile(path) as wheel:
-            # 校验实际安装内容，防止同版本的不同 wheel 或被修改的 editable 源码冒充。
-            records = [n for n in wheel.namelist() if n.endswith(".dist-info/RECORD")]
-            if len(records) != 1:
-                raise ValueError("wheel RECORD 无效")
-            import csv
-
-            for name, checksum, _ in csv.reader(wheel.read(records[0]).decode().splitlines()):
-                if not checksum or ".data/" in name:
-                    continue
-                installed = Path(distribution.locate_file(name))
-                if not installed.is_file() or installed.read_bytes() != wheel.read(name):
-                    raise ValueError(f"安装内容与候选 wheel 不一致：{name}")
     return distribution
 
 

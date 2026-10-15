@@ -1,5 +1,6 @@
 from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pandas as pd
@@ -27,7 +28,8 @@ class Session:
 def load(monkeypatch, rows: list[dict]) -> Session:
     frame = pd.DataFrame(rows, columns=["time", "code", *COLUMNS])
     frame["time"] = pd.to_datetime(frame.time)
-    monkeypatch.setattr(api, "query", lambda _: nullcontext(SimpleNamespace(data=frame)))
+    if rows:
+        monkeypatch.setattr(api, "query", lambda _: nullcontext(SimpleNamespace(data=frame)))
     engine = object.__new__(ResearchBacktest)
     engine.session = Session()
     engine.parameters = StrategyAnalysisParams(
@@ -65,6 +67,30 @@ def test_daily_messages_without_tradable_rows_are_empty(monkeypatch):
     {"up_limit": None}, {"down_limit": None}, {"pre_close": None}, {"open": None},
     {"close": None}, {"open": 0.0}, {"down_limit": -1.0},
 ])
-def test_daily_bars_with_missing_or_invalid_prices_still_fail(monkeypatch, values):
-    with pytest.raises(ValueError, match="不推测缺失价格"):
-        load(monkeypatch, [row("600000.SH"), row("000001.SZ", **values)])
+def test_daily_bars_with_missing_or_invalid_prices_skip_only_affected_rows(monkeypatch, values):
+    warning = Mock()
+    monkeypatch.setattr(api.log, "warning", warning)
+    session = load(monkeypatch, [row("600000.SH"), row("000001.SZ", **values)])
+    assert session.uploads["soloDaily"].code.tolist() == ["600000.XSHG"]
+    warning.assert_called_once()
+    assert warning.call_args.args[1] == 1
+
+
+def test_daily_bars_warn_once_with_skipped_security_day_count(monkeypatch):
+    warning = Mock()
+    monkeypatch.setattr(api.log, "warning", warning)
+    session = load(monkeypatch, [
+        row("600000.SH", close=None), row("000001.SZ", pre_close=0),
+    ])
+    assert "soloDaily" not in session.uploads
+    assert session.scripts == ["soloMessages = table(array(TIMESTAMP,0) as timestamp)"]
+    warning.assert_called_once()
+    assert warning.call_args.args[1] == 2
+
+
+def test_explicitly_empty_symbols_skip_market_queries(monkeypatch):
+    query = Mock(side_effect=AssertionError("empty symbols must not query the universe"))
+    monkeypatch.setattr(api, "query", query)
+    session = load(monkeypatch, [])
+    assert session.scripts == ["soloMessages = table(array(TIMESTAMP,0) as timestamp)"]
+    query.assert_not_called()

@@ -1,76 +1,46 @@
-import hashlib
 from types import SimpleNamespace
-from zipfile import ZipFile
 
 import pytest
 from pydantic import BaseModel
 
 from scheme import Algo, ResearchContext
-from scheme.execute.packages import validate_environment, verify_component
-from scheme.execute.schema import Component, Environment
+from scheme.execute.packages import installed_versions, verify_component
+from scheme.execute.schema import Component
 from scheme.execute.strategy.assembly import validate_context
 
 
 @pytest.fixture
-def candidate(tmp_path, monkeypatch):
-    installed = tmp_path / "installed"
-    installed.mkdir()
-    source = installed / "algo.py"
-    source.write_bytes(b"class Algo: pass\n")
-    wheel = tmp_path / "candidate.whl"
-    with ZipFile(wheel, "w") as archive:
-        archive.writestr("algo.py", source.read_bytes())
-        archive.writestr("demo-1.0.0.dist-info/RECORD", "algo.py,sha256=unused,17\n")
-    dist = SimpleNamespace(
-        version="1.0.0", requires=["scheme>=1,<1.1"], locate_file=lambda p: installed / p
-    )
+def candidate(monkeypatch):
+    dist = SimpleNamespace(version="1.0.0", requires=["scheme>=1,<1.1"])
     monkeypatch.setattr("scheme.execute.packages.metadata.distribution", lambda _: dist)
     monkeypatch.setattr("scheme.execute.packages.metadata.version", lambda _: "1.0.0")
     component = Component(
-        package="demo",
-        version="1.0.0",
-        wheel=str(wheel),
-        sha256=hashlib.sha256(wheel.read_bytes()).hexdigest(),
-        entry="algo:Algo",
+        package="demo", version="1.0.0", wheel="candidate.whl", entry="algo:Algo",
     )
-    return component, source, dist
+    return component, dist
 
 
-def test_wheel_contents_match_installed(candidate):
-    component, _, dist = candidate
+def test_component_uses_installed_distribution(candidate):
+    component, dist = candidate
     assert verify_component(component) is dist
 
 
-def test_wrong_wheel_hash(candidate):
-    component, _, _ = candidate
-    component.sha256 = "0" * 64
-    with pytest.raises(ValueError, match="SHA256"):
-        verify_component(component)
-
-
-def test_same_version_modified_source(candidate):
-    component, source, _ = candidate
-    source.write_bytes(b"changed")
-    with pytest.raises(ValueError, match="安装内容"):
-        verify_component(component)
-
-
 def test_wrong_installed_version(candidate):
-    component, _, dist = candidate
+    component, dist = candidate
     dist.version = "1.0.7"
     with pytest.raises(ValueError, match="实际安装版本"):
         verify_component(component)
 
 
 def test_wrong_scheme_major(candidate):
-    component, _, dist = candidate
+    component, dist = candidate
     component.version = dist.version = "2.0.0"
     with pytest.raises(ValueError, match="主版本"):
         verify_component(component)
 
 
 def test_missing_scheme_requirement(candidate):
-    component, _, dist = candidate
+    component, dist = candidate
     dist.requires = []
     with pytest.raises(ValueError, match="声明兼容"):
         verify_component(component)
@@ -138,7 +108,7 @@ def test_missing_scheme_requirement(candidate):
     pytest.param(["scheme>=not-a-version,<1.2.0"], "1.1.0", "1.1.0", False, id="malformed-requirement"),
 ])
 def test_wheel_scheme_compatibility(candidate, monkeypatch, requirements, scheme_version, package_version, compatible):
-    component, _, dist = candidate
+    component, dist = candidate
     component.version = dist.version = package_version
     dist.requires = requirements
     monkeypatch.setattr("scheme.execute.packages.metadata.version", lambda _: scheme_version)
@@ -155,7 +125,7 @@ def test_wheel_scheme_compatibility(candidate, monkeypatch, requirements, scheme
 ])
 @pytest.mark.parametrize("target", ["scheme", "package"])
 def test_wheel_rejects_non_release_versions(candidate, monkeypatch, target, version):
-    component, _, dist = candidate
+    component, dist = candidate
     component.version = dist.version = version if target == "package" else "1.1.0"
     dist.requires = ["scheme>=1.1.0,<1.2.0"]
     scheme_version = version if target == "scheme" else "1.1.0"
@@ -170,7 +140,7 @@ def test_wheel_rejects_non_release_versions(candidate, monkeypatch, target, vers
 def test_wheel_accepts_equivalent_release_version_segments(
     candidate, monkeypatch, scheme_version, package_version,
 ):
-    component, _, dist = candidate
+    component, dist = candidate
     component.version = dist.version = package_version
     dist.requires = ["scheme>=1,<1.1"] if scheme_version == "1" or package_version == "1" else [
         "scheme>=1.1,<1.2"
@@ -179,14 +149,13 @@ def test_wheel_accepts_equivalent_release_version_segments(
     assert verify_component(component) is dist
 
 
-@pytest.mark.parametrize("actual_version,locked_version", [("1.1.0", "1.1.7"), ("1.1.7", "1.1.0")])
-def test_environment_lock_keeps_exact_scheme_patch(tmp_path, monkeypatch, actual_version, locked_version):
-    lock = tmp_path / "uv.lock"
-    lock.write_text(f'[[package]]\nname="scheme"\nversion="{locked_version}"\n', encoding="utf-8")
-    dist = SimpleNamespace(metadata={"Name": "scheme"}, version=actual_version, requires=[])
-    monkeypatch.setattr("scheme.execute.packages.metadata.distributions", lambda: [dist])
-    with pytest.raises(ValueError, match="不在任务锁文件"):
-        validate_environment(Environment(lockfile=lock))
+def test_installed_versions_records_distribution_metadata(monkeypatch):
+    distributions = [
+        SimpleNamespace(metadata={"Name": "Scheme"}, version="1.1.0"),
+        SimpleNamespace(metadata={"Name": "Arena_Runtime"}, version="2.0.0"),
+    ]
+    monkeypatch.setattr("scheme.execute.packages.metadata.distributions", lambda: distributions)
+    assert installed_versions() == {"scheme": "1.1.0", "arena-runtime": "2.0.0"}
 
 
 def test_context_mismatch():

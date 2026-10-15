@@ -143,6 +143,16 @@ logger.info("训练完成：%d 个样本", count)
 
 独立研究进程没有配置标准库日志时，研究包（`factor`、`model_1a2b` 等平台包名及其子模块）、Notebook（`__main__`）、`backtest` 和 `scheme` 的标准库日志按所选级别输出；其他第三方库只输出 WARNING 及以上。宿主已配置标准库日志时，保留已有处理器和 root 级别，日志继续由宿主处理，不替换或关闭其日志文件。Scheme 自身日志的格式和级别设置仍然生效。
 
+### 1.6.1 去除文件哈希与简化校验
+
+- 正式任务输入的组件只含 `package`、`version`、`wheel`、`entry`（因子另有 `params`），不再携带 `sha256`；`run.json` 不再记录输入、锁文件和报告的 SHA256。安装内容由 uv 按锁文件保证，不再下载或比对 wheel 内容。
+- 回测中个别证券缺少开收盘、昨收或涨跌停价时，只跳过该证券当日行情并给出警告，不再中止整批；基准缺失部分交易日时保留回测结果，缺失日为空。
+- 因子面板中研究区间外的记录直接过滤，因子列按数值转换；风险平价只在求解失败时回退等权。
+- 允许空 `symbols`、总仓位为 0、依赖其他字段的默认值工厂、任意正数报告高度和负数预览行数；删除重复的上下文校验和未知字段预检，交由 Pydantic 处理。
+- 内置独立报告前端同步更新：允许中文与空格文件名、少量数据点绘图，可选附件读取失败只在局部提示。
+
+新的任务协议需要配套的 Runtime、Backend 和 Jupyter；旧版 Scheme 1.6.0 及更早版本仍要求任务输入带 `sha256`，在新服务下不能执行正式任务。已有 1.6.0 项目通过“升级版本”切到 1.6.1 即可，模板仍声明 `scheme>=1.6.0,<1.7.0`。
+
 ### 1.5.0 传统泛型与动态类型解析
 
 - 泛型类和函数统一使用 `TypeVar` / `Generic`，类型别名使用 `TypeAlias`；保留原有参数顺序、约束及方差推断，Jupyter Jedi 可解析 `self.params.universe.query`。
@@ -243,10 +253,10 @@ scheme run --input /shared/tasks/123/input.json --output /shared/tasks/123/repor
 ```
 
 正式调用发生在任务锁定的 uv 环境中。启动器 Runtime 只安装任务依赖并调用上面的固定 CLI。
-输入中的 environment 只含 lockfile，研究包 wheel 的身份、哈希、scheme 兼容范围及实际环境由 scheme 校验。
+输入中的 environment 只含 lockfile，研究包的身份与 scheme 兼容范围由 scheme 校验，环境安装由 uv 按锁文件完成。
 kind 分别为 factor、model、optimize、control、execution、strategy，对应各自执行入口；strategy 用于完整策略组装。当前除 factor 外，各入口暂时复用回测报告实现。
 报告类型由结果对象决定，单独写入 run.json 的 report_kind，任务 kind 始终保留原值。输出 Parquet 后，最后原子写入协议版本 1 的 run.json。
-完成清单包含原始输入、锁文件和各报告文件的 SHA256，以及实际安装版本。
+完成清单包含各报告文件和实际安装版本。
 任务输入由 Scheme 参数模型定义，进程协议见根工作区 runtime/README.md。
 
 Jupyter SDK 使用 `scheme.base`、`scheme.execute`、`scheme.data`。
@@ -443,8 +453,8 @@ target 为 dict[Asset, float]，表示完整目标资产权重，以账户权益
 若轮到提交时已经收盘或午休，订单保留到下一个可交易回调；真正报单时将 time 设置为当前回测时间。
 这是待提交订单的发送时间，不是提前指定未来执行时间，且不会改写原订单对象。
 
-研究包版本必须与任务安装的 scheme 同主版本、次版本并声明整个补丁系列的兼容范围；wheel 哈希、实际安装内容、
-参数 BaseModel、入口所属包均检查。报告写共享目录，run.json 最后写入，含展开后的参数、实际版本与报告文件名。
+研究包版本必须与任务安装的 scheme 同主版本、次版本并声明整个补丁系列的兼容范围；
+参数 BaseModel、入口所属包均检查，安装内容由 uv 按锁文件保证。报告写共享目录，run.json 最后写入，含展开后的参数、实际版本与报告文件名。
 不同正式运行应使用不同输出目录。Python 直接调用用于当前 Kernel 调试；正式包身份及锁文件检查由 CLI 执行。
 
 验证：`uv run pytest` 默认执行无需服务的测试；设置 `SOLO_TEST_DOLPHIN=1` 并提供以上连接变量后，
@@ -474,4 +484,4 @@ report.show()
 ```
 
 三个项目目前均输出与 Model 相同的完整回测报告。正式保存会将当前包、所有选择的上游包及传递依赖冻结为 wheel，
-记录包版本、入口和 SHA256；Worker 使用冻结环境运行，读取当前项目对应的候选包，而不是把它误当成 Model。
+记录包版本和入口；Worker 使用冻结环境运行，读取当前项目对应的候选包，而不是把它误当成 Model。

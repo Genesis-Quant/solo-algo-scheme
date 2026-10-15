@@ -15,7 +15,7 @@ class Report:
     def show(
         self,
         *,
-        height: int = 1000,
+        height: int | float = 1000,
         theme: Literal["light", "dark"] = "light",
         annual_trading_days: int = 252,
         risk_free_rate: float = 0.0,
@@ -74,6 +74,4 @@ class Report:
         """Jupyter 直接显示返回的 DataFrame。"""
         if name not in self.filenames:
             raise KeyError(name)
-        if rows < 0:
-            raise ValueError("rows 不能为负数")
         return getattr(self, name).head(rows)

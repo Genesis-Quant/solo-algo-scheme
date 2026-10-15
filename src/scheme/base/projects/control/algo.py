@@ -11,7 +11,6 @@ from pydantic import BaseModel
 from scheme.base.internal.algo import Algo
 from scheme.base.internal.context import ResearchContext
 from scheme.base.internal.types import Order, Target
-from scheme.data.dolphindb.symbols import normalize_assets
 
 __all__ = ["ControlAlgo"]
 
@@ -24,7 +23,6 @@ class ControlAlgo(Algo[P, C], Generic[P, C]):
         target = self.ctx.target
         if target is None or self.ctx.orders is not None:
             return False
-        target = normalize_assets(target)
         self.ctx.target = None
         self.on_target(target)
         return True
@@ -36,7 +34,6 @@ class ControlAlgo(Algo[P, C], Generic[P, C]):
 
     def target_orders(self, target: Target, *, lot_size: int = 100) -> list[Order]:
         """以账户权益为分母，将完整目标权重转换为相对当前持仓的订单。"""
-        target = normalize_assets(target)
         if any(not np.isfinite(weight) for weight in target.values()):
             raise ValueError("目标权重必须是有限数值")
         quantities: dict[str, int] = {}

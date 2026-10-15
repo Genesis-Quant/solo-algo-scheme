@@ -145,6 +145,17 @@ def test_runtime_dates_are_required_validated_and_round_trip(model, values):
         model.model_validate({**DATES, **values, "start": "not-a-date"})
 
 
+@pytest.mark.parametrize("analysis,selectors", [
+    (StrategyAnalysisParams, {}),
+    *((analysis, selectors) for _, analysis, _, selectors in STAGES),
+])
+def test_empty_symbols_remain_distinct_from_inferred_universe(analysis, selectors):
+    assert analysis(**DATES, **selectors).symbols is None
+    params = analysis(**DATES, **selectors, symbols=[])
+    assert params.symbols == []
+    assert analysis.model_validate_json(params.model_dump_json()).symbols == []
+
+
 def test_factor_and_strategy_runtime_models_are_independent_direct_models():
     assert FactorParams.__bases__ == (BaseModel,)
     assert StrategyParams.__bases__ == (BaseModel,)

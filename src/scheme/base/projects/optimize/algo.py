@@ -8,7 +8,6 @@ from pydantic import BaseModel
 from scheme.base.internal.algo import Algo
 from scheme.base.internal.context import ResearchContext
 from scheme.base.internal.types import Signal
-from scheme.data.dolphindb.symbols import normalize_assets
 
 __all__ = ["OptimizeAlgo"]
 
@@ -21,7 +20,6 @@ class OptimizeAlgo(Algo[P, C], Generic[P, C]):
         signals = self.ctx.signal
         if signals is None or self.ctx.target is not None:
             return False
-        signals = normalize_assets(signals)
         self.ctx.signal = None
         self.on_signal(signals)
         return True

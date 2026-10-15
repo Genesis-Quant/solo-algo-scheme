@@ -40,7 +40,7 @@ class ModelAnalysisParams(ModelParams):
         title="行情类型",
         json_schema_extra={"x-enum-labels": ["日频合成快照", "Tick 快照"]},
     )
-    symbols: list[str] | None = Field(default=None, min_length=1, title="行情股票范围")
+    symbols: list[str] | None = Field(default=None, title="行情股票范围")
     benchmark: str | None = Field(default=None, title="基准代码")
     batch_days: int = Field(default=1, ge=1, title="行情加载批次天数")
     config: dict[str, Any] = Field(

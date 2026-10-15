@@ -114,14 +114,14 @@ def report_html(
 def notebook_html(
     report: "Report",
     *,
-    height: int = 1000,
+    height: int | float = 1000,
     theme: Literal["light", "dark"] = "light",
     annual_trading_days: int = 252,
     risk_free_rate: float = 0.0,
 ) -> str:
     """用 iframe 隔离样式与 JS，不修改 Notebook 页面。"""
-    if isinstance(height, bool) or not isinstance(height, int) or height < 200:
-        raise ValueError("height 不能小于 200")
+    if isinstance(height, bool) or not isinstance(height, (int, float)) or not height > 0:
+        raise ValueError("height 必须为正数")
     document = html.escape(
         report_html(
             report,
@@ -132,6 +132,6 @@ def notebook_html(
         quote=True,
     )
     return (
-        f'<iframe title="Scheme 研究报告" style="width:100%;height:{int(height)}px;border:0" '
+        f'<iframe title="Scheme 研究报告" style="width:100%;height:{height}px;border:0" '
         f'sandbox="allow-scripts allow-same-origin allow-downloads" srcdoc="{document}"></iframe>'
     )

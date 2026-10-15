@@ -175,11 +175,6 @@ class ResearchForm(ReportForm[P], Generic[P]):
         _check_aliases(target, target.model_fields.keys() - (cls._internal_fields - cls._supplied_fields))
         fields = {}
         for name, field in target.model_fields.items():
-            if field.default_factory_takes_validated_data:
-                raise TypeError(
-                    f"自动 Form 字段 {name!r} 不支持依赖其他字段的 default_factory；"
-                    "请使用无参默认工厂，或在分析参数的 model_validator 中推导"
-                )
             inherited = _field_owner(target, name) is _field_owner(base, name)
             if name in cls._stage_fields and not (name in base.model_fields and inherited):
                 raise TypeError(f"{name!r} 是 Scheme 管理的上下游选择字段，项目参数不能声明同名字段")
@@ -257,7 +252,9 @@ class BacktestForm(ResearchForm[P], Generic[P]):
     def _analysis_values(self) -> dict[str, Any]:
         values = super()._analysis_values()
         field = self.analysis_model().model_fields["config"]
-        config = {} if field.is_required() else deepcopy(field.get_default(call_default_factory=True))
+        config = {} if field.is_required() else deepcopy(
+            field.get_default(call_default_factory=True, validated_data=values)
+        )
         values["config"] = {
             **config, **{name: values.pop(name) for name in ("cash", "commission", "tax")},
         }

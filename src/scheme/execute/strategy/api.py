@@ -134,14 +134,15 @@ class ResearchBacktest(Backtest[BacktestC], Generic[BacktestC]):
                 soloMessages = soloTickMessages(soloSnapshotRows, soloSnapshotReference, soloUniverse)
             """)
         else:
-            # 停牌、未上市或已退市证券当日没有日线，不能成交，也不合成快照。
-            frame = frame[frame[["open", "close", "pre_close"]].notna().any(axis=1)]
+            columns = ["open", "close", "pre_close", "up_limit", "down_limit"]
+            valid = (frame[columns].notna() & (frame[columns] > 0)).all(axis=1)
+            skipped = int((~valid).sum())
+            if skipped:
+                log.warning("日线价格缺失或非正，{} 条证券日记录不合成快照，当日不可交易", skipped)
+            frame = frame[valid]
             if frame.empty:
                 self.session.run("soloMessages = table(array(TIMESTAMP,0) as timestamp)")
                 return DosVar("soloMessages")
-            columns = ["open", "close", "pre_close", "up_limit", "down_limit"]
-            if frame[columns].isna().any().any() or (frame[columns] <= 0).any().any():
-                raise ValueError("日线合成快照需要有效 OHLC、昨收与涨跌停价；不推测缺失价格")
             self.session.upload({"soloDaily": frame})
             self.session.run("soloMessages = soloDailyMessages(soloDaily)")
         return DosVar("soloMessages")
@@ -256,18 +257,23 @@ def _run(
             ) as result:
                 benchmark = result.data
             if benchmark.empty:
-                raise ValueError("基准数据不可用")
-            benchmark["tradeDate"] = benchmark.time.dt.date
-            portfolios = portfolios.merge(
-                benchmark[["tradeDate", "close"]].rename(columns={"close": "benchmarkClosePrice"}),
-                on="tradeDate",
-                how="left",
-                validate="one_to_one",
-            )
-            prices = portfolios.benchmarkClosePrice
-            if not np.isfinite(prices).all() or (prices <= 0).any():
-                raise ValueError("基准缺少回测交易日或收盘价无效")
-            portfolios["benchmarkNetValue"] = prices / prices.iloc[0]
+                log.warning("基准 {} 没有行情，不输出基准列", parameters.benchmark)
+            else:
+                benchmark["tradeDate"] = benchmark.time.dt.date
+                portfolios = portfolios.merge(
+                    benchmark[["tradeDate", "close"]].rename(columns={"close": "benchmarkClosePrice"}),
+                    on="tradeDate",
+                    how="left",
+                    validate="one_to_one",
+                )
+                prices = portfolios.benchmarkClosePrice.where(
+                    np.isfinite(portfolios.benchmarkClosePrice) & (portfolios.benchmarkClosePrice > 0)
+                )
+                portfolios["benchmarkClosePrice"] = prices
+                valid_prices = prices.dropna()
+                portfolios["benchmarkNetValue"] = (
+                    prices / valid_prices.iloc[0] if not valid_prices.empty else np.nan
+                )
         diagnostics = [row for algo in algos for row in algo.diagnostics]
         return BacktestResult(
             trade_details=records_frame(engine.get_trade_details(), TradeDetail),

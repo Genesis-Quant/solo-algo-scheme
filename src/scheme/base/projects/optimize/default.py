@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from numbers import Real
 from typing import Any, Generic, TypeVar
 
 import numpy as np
@@ -15,7 +16,7 @@ from scheme.base.internal.types import Signal, Target
 from scheme.base.projects.optimize import OptimizeAlgo
 from scheme.base.projects.optimize import OptimizeParams as BaseOptimizeParams
 from scheme.data import query
-from scheme.data.dolphindb.symbols import engine_symbol, normalize_assets, source_symbol
+from scheme.data.dolphindb.symbols import engine_symbol, source_symbol
 from scheme.log import get_logger
 
 __all__ = ["risk_parity", "OptimizeParams", "RiskParity"]
@@ -31,11 +32,10 @@ def risk_parity(returns: pd.DataFrame) -> tuple[np.ndarray, str | None]:
         return np.array([]), None
     equal = np.full(count, 1 / count)
     valid = returns.dropna()
-    if len(valid) < max(20, count + 1):
+    # Sample covariance needs at least two rows.
+    if len(valid) < 2:
         return equal, "历史样本不足"
     covariance = valid.cov().to_numpy()
-    if not np.isfinite(covariance).all() or np.linalg.eigvalsh(covariance).min() <= 1e-12:
-        return equal, "协方差退化"
     covariance /= np.trace(covariance)
 
     def objective(weights: np.ndarray) -> float:
@@ -50,14 +50,14 @@ def risk_parity(returns: pd.DataFrame) -> tuple[np.ndarray, str | None]:
         method="SLSQP",
         options={"ftol": 1e-12, "maxiter": 500},
     )
-    if not result.success or objective(result.x) > 1e-6:
+    if not result.success:
         return equal, "风险平价求解未收敛"
     return result.x, None
 
 
 class OptimizeParams(BaseOptimizeParams):
     lookback_days: int = Field(default=180, ge=30)
-    gross_exposure: float = Field(default=0.98, gt=0, le=1)
+    gross_exposure: float = Field(default=0.98, ge=0, le=1)
 
 
 class RiskParity(OptimizeAlgo[OptimizeParams, C], Generic[C]):
@@ -68,8 +68,7 @@ class RiskParity(OptimizeAlgo[OptimizeParams, C], Generic[C]):
         self.ctx.target = self.allocate(signals)
 
     def allocate(self, signals: Signal[Any]) -> Target:
-        signals = normalize_assets(signals)
-        if any(not isinstance(s, (int, float)) or not np.isfinite(s) for s in signals.values()):
+        if any(not isinstance(s, Real) or not np.isfinite(s) for s in signals.values()):
             raise TypeError("默认风险平价接受有符号数值 Signal；其他值类型请提供自定义 Optimize")
         symbols = [s for s, value in signals.items() if value != 0]
         if not symbols:

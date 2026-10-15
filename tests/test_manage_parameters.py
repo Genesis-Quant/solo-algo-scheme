@@ -119,9 +119,17 @@ def test_sole_generic_form_alias_defaults_round_trip_to_runtime(project, alias):
     })
     assert payload["factor"]["window"] == 17
     assert "window" not in payload["analysis"]
-    for unknown in ("window", "serialized_days", "legacy_days", "config", "unknown", "model"):
-        with pytest.raises(ValueError, match=f"未声明字段.*{unknown}"):
-            inspect_project(directory, {"form": {"lookback_days": 17, unknown: 99}})
+    for key in ("window", "serialized_days", "legacy_days", "config", "unknown", "model"):
+        assert inspect_project(directory, {
+            "form": {"lookback_days": 17, key: 99},
+        })["factor"]["window"] == 17
+    assert inspect_project(directory, {"form": {"window": 17}})["factor"]["window"] == 17
+    if isinstance(alias, AliasChoices):
+        assert inspect_project(directory, {"form": {"legacy_days": 17}})["factor"]["window"] == 17
+        if isinstance(alias.choices[0], AliasPath):
+            assert inspect_project(directory, {
+                "form": {"config": {"window": 17}},
+            })["factor"]["window"] == 17
     with pytest.raises(ValidationError, match="lookback_days"):
         inspect_project(directory, {"form": {"lookback_days": 0}})
 
@@ -183,7 +191,7 @@ def test_form_with_alias_validation_disabled_keeps_canonical_wire_key(project):
     assert set(definition["schemas"]["form"]["properties"]) == {"window"}
     assert definition["values"] == {"form": {"window": 20}}
     assert inspect_project(directory, {"form": {"window": 17}})["factor"]["window"] == 17
-    with pytest.raises(ValueError, match="未声明字段.*lookback_days"):
+    with pytest.raises(ValidationError, match="lookback_days.*[\\s\\S]*extra_forbidden"):
         inspect_project(directory, {"form": {"lookback_days": 17}})
 
 

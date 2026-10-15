@@ -184,7 +184,7 @@ def test_model_form_default_chain_with_real_matching(monkeypatch, tmp_path):
         def on_trade(self, trades: Sequence[TradeReport]) -> None:
             self.ctx.fills += sum(t.tradeQty for t in trades)
 
-    # 唯一股票的历史样本不足，默认风险平价明确退化为等权。
+    # 没有有效历史行情，默认风险平价在求解失败后退化为等权。
     monkeypatch.setattr(
         "scheme.base.projects.optimize.default.query",
         lambda _: nullcontext(

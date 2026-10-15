@@ -54,7 +54,7 @@ class FactorAnalysisParams(FactorParams):
         if len(set(self.columns)) != len(self.columns):
             raise ValueError("因子列不能重复")
         reserved = {
-            "date", "symbol", "time", "code", "circ_mv", "adjusted_open", "adjusted_close",
+            "date", "symbol", "time", "code", "circ_mv",
             *self.return_columns,
         }
         if set(self.columns) & reserved:

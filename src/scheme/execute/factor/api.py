@@ -27,19 +27,17 @@ def prepare_panel(panel: pd.DataFrame, parameters: FactorAnalysisParams) -> pd.D
         panel[parameters.columns].reset_index().rename(columns={"date": "time", "symbol": "code"})
     )
     frame["time"] = pd.to_datetime(frame["time"])
-    if (
-        frame.empty
-        or not frame.time.between(
-            pd.Timestamp(parameters.start), pd.Timestamp(parameters.end), inclusive="left"
-        ).all()
-    ):
-        raise ValueError("因子面板为空或包含日期范围外的记录")
+    frame = frame[frame.time.between(
+        pd.Timestamp(parameters.start), pd.Timestamp(parameters.end), inclusive="left"
+    )]
+    if frame.empty:
+        raise ValueError("因子面板为空")
     frame["code"] = frame["code"].map(engine_symbol)
     if frame.duplicated(["time", "code"]).any():
         raise ValueError("证券代码规范化后存在重复记录")
-    if not all(pd.api.types.is_numeric_dtype(frame[c]) for c in parameters.columns):
-        raise TypeError("分析因子必须为数值列")
-    frame[parameters.columns] = frame[parameters.columns].replace([np.inf, -np.inf], np.nan)
+    frame[parameters.columns] = frame[parameters.columns].apply(pd.to_numeric).replace(
+        [np.inf, -np.inf], np.nan
+    )
     return frame.sort_values(["time", "code"])
 
 

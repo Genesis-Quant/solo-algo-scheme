@@ -39,8 +39,8 @@ from scheme.config import DolphinSettings
 from scheme.data.dolphindb.universe import MEMBERS
 from scheme.execute.factor.api import analyze_factors, prepare_panel
 from scheme.execute.factor.result import FactorAnalysisResult
-from scheme.execute.packages import load_entry, validate_environment
-from scheme.execute.schema import Environment, FactorTask, StrategyTask
+from scheme.execute.packages import load_entry
+from scheme.execute.schema import FactorTask, StrategyTask
 from scheme.execute.strategy.result import BacktestResult
 from scheme.manage import main
 
@@ -122,7 +122,23 @@ def test_factor_panel_uses_half_open_dates(day):
         index=pd.MultiIndex.from_tuples([(date.fromisoformat(day), "000001.SZ")],
                                         names=["date", "symbol"]),
     )
-    with pytest.raises(ValueError, match="日期范围外"):
+    with pytest.raises(ValueError, match="因子面板为空"):
+        prepare_panel(panel, params)
+    source = prepare_panel(pd.concat([
+        panel,
+        ExampleFactor(FactorParams(**DATES)).compute(params.start, params.end),
+    ]), params)
+    assert source.time.tolist() == [pd.Timestamp(DATES["start"])] * 2
+    assert source.f.tolist() == [1.0, 2.0]
+
+
+def test_factor_panel_converts_numeric_values_without_coercing_invalid_input():
+    params = FactorAnalysisParams(**DATES, columns=["f"])
+    panel = ExampleFactor(FactorParams(**DATES)).compute(params.start, params.end)
+    panel["f"] = ["1.25", "2"]
+    assert prepare_panel(panel, params).f.tolist() == [1.25, 2.0]
+    panel.loc[:, "f"] = "not-a-number"
+    with pytest.raises(ValueError, match="Unable to parse"):
         prepare_panel(panel, params)
 
 
@@ -318,8 +334,6 @@ def test_downstream_form_runs_current_stage(
     explicit = State(count=4)
     assert params.run(classes[kind], ctx=explicit) is report
     assert calls[-1]["ctx"] is explicit
-    with pytest.raises(TypeError, match="需要"):
-        params.run(classes[kind], ctx=OtherState())
     with pytest.raises(TypeError, match="run 需要"):
         params.run(Model)
     assert len(calls) == 2
@@ -521,8 +535,6 @@ def test_model_form_runs_complete_chain(backtest_spy, settings):
     ctx = State(count=4)
     assert params.run(Model, ctx=ctx) is report
     assert calls[-1]["ctx"] is ctx
-    with pytest.raises(TypeError, match="需要"):
-        params.run(Model, ctx=OtherState())
     with pytest.raises(TypeError, match="ModelAlgo"):
         params.run(ExampleFactor)
     assert len(calls) == 2
@@ -844,6 +856,65 @@ def test_real_backtest_api_with_offline_engine_retains_parameter_subtype(setting
     assert result.parameters.config["nested"] == [1]
 
 
+@pytest.mark.parametrize("quotes", [
+    [],
+    [("2025-01-02", 100.0), ("2025-01-04", 110.0)],
+    [("2025-01-01", 0.0), ("2025-01-02", 100.0), ("2025-01-03", np.inf),
+     ("2025-01-04", 110.0)],
+    [("2025-01-02", np.nan)],
+])
+def test_backtest_preserves_results_with_empty_or_sparse_benchmark(monkeypatch, settings, quotes):
+    from scheme.execute.strategy import api
+
+    parameters = StrategyAnalysisParams(
+        start="2025-01-01", end="2025-01-06", benchmark="000300.SH",
+    )
+    benchmark = pd.DataFrame(quotes, columns=["time", "close"])
+    benchmark["time"] = pd.to_datetime(benchmark.time)
+    request = Mock(return_value=nullcontext(SimpleNamespace(data=benchmark)))
+    warning = Mock()
+    monkeypatch.setattr(api, "query", request)
+    monkeypatch.setattr(api.log, "warning", warning)
+    engine = Mock()
+    engine.__enter__ = Mock(return_value=engine)
+    engine.__exit__ = Mock(return_value=False)
+    engine.get_daily_total_portfolios.return_value = [
+        Mock(model_dump=Mock(return_value={"tradeDate": day.date(), "netValue": 1.0}))
+        for day in pd.date_range("2025-01-01", periods=5)
+    ]
+    for name in ("get_trade_details", "get_daily_position", "get_daily_trading_statistics"):
+        getattr(engine, name).return_value = []
+    result = api._run([], State(), parameters, settings, Mock(return_value=engine))
+    portfolios = result.daily_portfolios
+    assert len(portfolios) == 5
+    assert portfolios.netValue.tolist() == [1.0] * 5
+    assert request.call_args.args[0]["end_date"] == "2025-01-05"
+    if not quotes:
+        assert "benchmarkClosePrice" not in portfolios
+        assert "benchmarkNetValue" not in portfolios
+        warning.assert_called_once()
+    elif benchmark.close.gt(0).any():
+        assert portfolios.benchmarkClosePrice.iloc[[0, 2, 4]].isna().all()
+        assert portfolios.benchmarkNetValue.iloc[[0, 2, 4]].isna().all()
+        assert portfolios.benchmarkNetValue.iloc[[1, 3]].tolist() == pytest.approx([1.0, 1.1])
+    else:
+        assert portfolios.benchmarkClosePrice.isna().all()
+        assert portfolios.benchmarkNetValue.isna().all()
+
+
+def test_run_backtest_validates_context_once_before_creating_engine(monkeypatch, settings):
+    from scheme.execute.strategy import api
+
+    class Model(ModelAlgo[ModelParams, State]):
+        pass
+
+    engine_type = Mock(side_effect=AssertionError("invalid context must not start the engine"))
+    with pytest.raises(TypeError, match="State"):
+        api.run_backtest([Model(ModelParams())], OtherState(), StrategyAnalysisParams(**DATES),
+                         settings=settings, engine_type=engine_type)
+    engine_type.assert_not_called()
+
+
 @pytest.fixture
 def frozen_factor_task(tmp_path, monkeypatch):
     from scheme.execute.factor import task
@@ -859,14 +930,14 @@ def frozen_factor_task(tmp_path, monkeypatch):
         kind="factor", environment={"lockfile": str(tmp_path / "uv.lock")},
         output=str(tmp_path / "unused-output"),
         factor=dict(package="factor_fixture", version="1.0.0", wheel="fixture.whl",
-                    sha256="a" * 64, entry="factor_fixture:Factor", params={"window": "17"}),
+                    entry="factor_fixture:Factor", params={"window": "17"}),
         analysis=FactorAnalysisParams(**DATES, columns=["f"], groups=3).model_dump(mode="json"),
     )
     versions = {"scheme": "1.0.1"}
     report = empty_factor_report(FactorAnalysisParams.model_validate(data["analysis"]))
     spies = {
         "check_output": Mock(),
-        "validate_environment": Mock(return_value=versions),
+        "installed_versions": Mock(return_value=versions),
         "load_component": Mock(return_value=FrozenFactor),
         "analyze_factors": Mock(return_value=report),
         "save_run": Mock(),
@@ -886,7 +957,7 @@ def test_frozen_factor_task_keeps_custom_runtime_without_analysis_leak(
             start="2024-01-01", end="2024-02-01", universe={"pool": StockPool.CSI300},
         )
     original = deepcopy(data)
-    assert task.run(data, input_sha256="b" * 64) == 0
+    assert task.run(data) == 0
     factor, analysis = spies["analyze_factors"].call_args.args
     assert type(factor) is factor_type
     assert type(factor.params) is model
@@ -901,9 +972,9 @@ def test_frozen_factor_task_keeps_custom_runtime_without_analysis_leak(
     assert saved_versions is versions
     assert saved.factor.params == factor.params.model_dump(mode="json")
     assert FactorTask.model_validate_json(saved.model_dump_json()) == saved
-    assert spies["save_run"].call_args.kwargs == {"input_sha256": "b" * 64}
+    assert spies["save_run"].call_args.kwargs == {}
     assert spies["load_component"].call_args.args == (saved.factor, Factor)
-    spies["validate_environment"].assert_called_once_with(saved.environment)
+    spies["installed_versions"].assert_called_once_with()
     spies["check_output"].assert_called_once_with(saved)
     assert data == original
     assert not saved.output.exists()
@@ -924,7 +995,7 @@ def test_frozen_factor_task_accepts_canonical_and_alias_runtime_fields(
 
     spies["load_component"].return_value = AliasedFactor
     data["factor"]["params"] = {field: 17}
-    assert task.run(data, input_sha256="b" * 64) == 0
+    assert task.run(data) == 0
     assert spies["analyze_factors"].call_args.args[0].params.window == 17
     assert spies["save_run"].call_args.args[0].factor.params["window"] == 17
 
@@ -945,7 +1016,7 @@ def test_frozen_factor_analysis_overrides_shared_field_aliases(frozen_factor_tas
         "begin": "2024-01-01", "from_date": "2023-01-01", "dates": {"begin": "2022-01-01"},
     }
     original = deepcopy(data)
-    assert task.run(data, input_sha256="b" * 64) == 0
+    assert task.run(data) == 0
     factor, analysis = spies["analyze_factors"].call_args.args
     assert factor.params.start == analysis.start == date(2025, 1, 1)
     assert data == original
@@ -956,12 +1027,12 @@ def test_frozen_factor_task_validates_required_custom_runtime(frozen_factor_task
     task, data, _, _, spies, _, _ = frozen_factor_task
     data["factor"]["params"] = runtime
     with pytest.raises(ValidationError, match="window"):
-        task.run(data, input_sha256="b" * 64)
+        task.run(data)
     spies["analyze_factors"].assert_not_called()
     spies["save_run"].assert_not_called()
 
 
-def test_risk_parity_equal_risk_and_fallback():
+def test_risk_parity_equal_risk():
     rng = np.random.default_rng(5)
     x = rng.normal(size=(20000, 2)) * [1.0, 3.0]
     weights, reason = risk_parity(pd.DataFrame(x))
@@ -970,11 +1041,78 @@ def test_risk_parity_equal_risk_and_fallback():
     covariance = np.cov(x.T)
     risk = weights * (covariance @ weights)
     assert risk[0] / risk[1] == pytest.approx(1.0, abs=0.01)
-    weights, reason = risk_parity(pd.DataFrame(x[:2]))
-    assert reason == "历史样本不足"
+
+
+def test_risk_parity_solves_short_singular_history():
+    returns = pd.DataFrame({"first": [-0.01, 0.01], "second": [-0.03, 0.03]})
+    weights, reason = risk_parity(returns)
+    assert reason is None
+    assert weights == pytest.approx([0.75, 0.25], abs=0.001)
+
+
+@pytest.mark.parametrize("rows", [[], [[0.01, 0.02]], [[0.01, None], [None, 0.02]]])
+def test_risk_parity_needs_two_complete_return_rows(rows):
+    weights, reason = risk_parity(pd.DataFrame(rows, columns=["a", "b"], dtype=float))
     assert weights == pytest.approx([0.5, 0.5])
-    _, reason = risk_parity(pd.DataFrame(np.zeros((30, 2))))
-    assert reason == "协方差退化"
+    assert reason == "历史样本不足"
+
+
+def test_risk_parity_falls_back_only_when_solver_fails(monkeypatch):
+    solver = Mock(return_value=SimpleNamespace(success=False))
+    monkeypatch.setattr("scheme.base.projects.optimize.default.minimize", solver)
+    weights, reason = risk_parity(pd.DataFrame({"a": [0.01, -0.01], "b": [0.02, -0.02]}))
+    assert weights == pytest.approx([0.5, 0.5])
+    assert reason == "风险平价求解未收敛"
+    solver.assert_called_once()
+
+
+@pytest.mark.parametrize("scalar", [np.int64(1), np.float32(-1.0)])
+def test_risk_parity_accepts_numpy_real_signals(monkeypatch, scalar):
+    from scheme.base.projects.optimize import default
+
+    allocator = default.RiskParity[State]()
+    allocator.backtest = SimpleNamespace(time=pd.Timestamp("2025-01-02"))
+    history = pd.DataFrame({
+        "time": pd.to_datetime(["2024-12-30", "2024-12-31", "2025-01-01"]),
+        "code": ["000001.SZ"] * 3, "close": [10.0, 11.0, 10.5], "adj_factor": [1.0] * 3,
+    })
+    monkeypatch.setattr(default, "query", lambda _: nullcontext(SimpleNamespace(data=history)))
+    target = allocator.allocate({"000001.XSHE": scalar})
+    assert target == {"000001.XSHE": pytest.approx(float(np.sign(scalar)) * 0.98)}
+
+
+def test_default_risk_parity_allows_zero_gross_exposure():
+    from scheme.base.projects.optimize.default import OptimizeParams
+
+    assert OptimizeParams(gross_exposure=0).gross_exposure == 0
+
+
+@pytest.mark.parametrize("base,field,method", [
+    (OptimizeAlgo, "signal", "on_signal"),
+    (ControlAlgo, "target", "on_target"),
+    (ExecutionAlgo, "orders", "on_orders"),
+])
+def test_stages_consume_already_normalized_context_message_once(base, field, method):
+    from backtest import Direction, MarketOrder
+
+    received = []
+    Consumer = type("Consumer", (base,), {
+        method: lambda self, value: received.append(value),
+    })
+    context = State()
+    value = [MarketOrder(
+        symbol="000001.SZ", time=pd.Timestamp("2025-01-02").to_pydatetime(),
+        quantity=100, direction=Direction.BUY_OPEN,
+    )] if field == "orders" else {"000001.SZ": 1.0}
+    setattr(context, field, value)
+    message = getattr(context, field)
+    assert (message[0].symbol if field == "orders" else next(iter(message))) == "000001.XSHE"
+    consumer = Consumer(ModelParams())
+    consumer.ctx = context
+    assert consumer.process()
+    assert len(received) == 1 and received[0] is message
+    assert getattr(context, field) is None
+    assert not consumer.process()
 
 
 @pytest.mark.parametrize(
@@ -984,7 +1122,6 @@ def test_risk_parity_equal_risk_and_fallback():
         {"batch_days": 0},
         {"config": {"startDate": "2025-01-01"}},
         {"config": {"strategyGroup": "future"}},
-        {"symbols": []},
         {"symbols": ["000001.SZ", "000001.XSHE"]},
     ],
 )
@@ -996,13 +1133,6 @@ def test_backtest_rejects_invalid_config(updates):
 def test_entry_must_belong_to_distribution():
     with pytest.raises(ValueError, match="不属于"):
         load_entry(distribution("scheme"), "pathlib:Path")
-
-
-def test_version_mismatch_before_execution(tmp_path):
-    lock = tmp_path / "uv.lock"
-    lock.write_text('[[package]]\nname="solo-runtime"\nversion="2.0.0"\n')
-    with pytest.raises(ValueError, match="不在任务锁文件"):
-        validate_environment(Environment(lockfile=lock))
 
 
 def test_cli_failure_returns_nonzero(tmp_path):
