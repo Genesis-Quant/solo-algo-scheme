@@ -11,8 +11,12 @@ from pydantic import BaseModel
 from scheme.base.internal.algo import Algo
 from scheme.base.internal.context import ResearchContext
 from scheme.base.internal.types import Order, Target
+from scheme.data.dolphindb.symbols import normalize_assets
+from scheme.log import get_logger
 
 __all__ = ["ControlAlgo"]
+
+log = get_logger("scheme.control")
 
 P = TypeVar("P", bound=BaseModel, infer_variance=True)
 C = TypeVar("C", bound=ResearchContext[Any], infer_variance=True)
@@ -34,16 +38,21 @@ class ControlAlgo(Algo[P, C], Generic[P, C]):
 
     def target_orders(self, target: Target, *, lot_size: int = 100) -> list[Order]:
         """以账户权益为分母，将完整目标权重转换为相对当前持仓的订单。"""
+        target = normalize_assets(target)
         if any(not np.isfinite(weight) for weight in target.values()):
             raise ValueError("目标权重必须是有限数值")
         quantities: dict[str, int] = {}
+        skipped: set[str] = set()
         symbols = [s for s, weight in target.items() if weight != 0]
         if symbols:
             prices = self.backtest.get_prices(symbols)
-            if any(
-                s not in prices or not np.isfinite(prices[s]) or prices[s] <= 0 for s in symbols
-            ):
-                raise ValueError("目标证券截至当前时点尚无有效价格")
+            skipped = {
+                s for s in symbols if s not in prices or not np.isfinite(prices[s]) or prices[s] <= 0
+            }
+            if skipped:
+                log.warning("目标证券截至当前时点尚无有效价格，跳过 {} 只下单，保持现有持仓", len(skipped))
+            symbols = [s for s in symbols if s not in skipped]
+        if symbols:
             equity = float(
                 self.backtest.session.run(
                     "exec first(totalEquity) from Backtest::getTotalPortfolios(engine)"
@@ -58,7 +67,7 @@ class ControlAlgo(Algo[P, C], Generic[P, C]):
             }
         positions = self.backtest.get_position()
         orders: list[Order] = []
-        for symbol in sorted(set(positions) | target.keys()):
+        for symbol in sorted((set(positions) | target.keys()) - skipped):
             position = positions.get(symbol)
             long = position.longPosition if position else 0
             short = position.shortPosition if position else 0

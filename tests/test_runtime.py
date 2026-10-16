@@ -363,8 +363,18 @@ def test_upstream_must_be_installed_and_correct_kind(monkeypatch):
     [
         ("1.0.0", {"model_old:ModelAlgo"}),
         ("1.0.7", {"model_old:ModelAlgo"}),
-        ("1.1.0", {"model_minimum:ModelAlgo", "model_patch:ModelAlgo", "model_shorthand:ModelAlgo"}),
-        ("1.1.7", {"model_minimum:ModelAlgo", "model_patch:ModelAlgo", "model_shorthand:ModelAlgo"}),
+        ("1.1.0", {
+            "model_minimum:ModelAlgo", "model_patch:ModelAlgo", "model_shorthand:ModelAlgo",
+            "model_patch_upper:ModelAlgo", "model_cross_minor_lower:ModelAlgo", "model_exact:ModelAlgo",
+            "model_excluded:ModelAlgo", "model_conditional:ModelAlgo", "model_extra:ModelAlgo",
+            "model_duplicate_bound:ModelAlgo", "model_compatible:ModelAlgo", "model_wildcard:ModelAlgo",
+        }),
+        ("1.1.7", {
+            "model_minimum:ModelAlgo", "model_patch:ModelAlgo", "model_shorthand:ModelAlgo",
+            "model_patch_upper:ModelAlgo", "model_cross_minor_lower:ModelAlgo",
+            "model_excluded:ModelAlgo", "model_conditional:ModelAlgo", "model_extra:ModelAlgo",
+            "model_duplicate_bound:ModelAlgo", "model_compatible:ModelAlgo", "model_wildcard:ModelAlgo",
+        }),
         ("1.2.0", {"model_new:ModelAlgo"}),
         ("2.3.0", {"model_other_major:ModelAlgo", "model_other_major_minimum:ModelAlgo"}),
         ("2.3.7", {"model_other_major:ModelAlgo", "model_other_major_minimum:ModelAlgo"}),
@@ -378,6 +388,8 @@ def test_algo_options_match_formal_scheme_compatibility(monkeypatch, version, ex
         "minimum": ("1.1.0", ["scheme>=1.1.0,<1.2.0"]),
         "patch": ("1.1.7", ["scheme>=1.1.0,<1.2.0"]),
         "shorthand": ("1.1", ["pydantic>=2,<3", "ScHeMe (<1.2, >=1.1)"]),
+        "compatible": ("1.1.0", ["scheme~=1.1.0"]),
+        "wildcard": ("1.1.0", ["scheme==1.1.*"]),
         "new": ("1.2.0", ["scheme>=1.2.0,<1.3.0"]),
         "other_major": ("2.3.7", ["scheme>=2.3.0,<2.4.0"]),
         "other_major_minimum": ("2.3.0", ["scheme>=2.3.0,<2.4.0"]),
@@ -902,6 +914,29 @@ def test_backtest_preserves_results_with_empty_or_sparse_benchmark(monkeypatch, 
         assert portfolios.benchmarkNetValue.isna().all()
 
 
+def test_strategy_validates_context_only_at_backtest_entry(monkeypatch, settings):
+    from scheme.execute.strategy import api, assembly
+
+    class Model(ModelAlgo[ModelParams, State]):
+        pass
+
+    validate = Mock(wraps=assembly.validate_context)
+    monkeypatch.setattr(assembly, "validate_context", validate)
+    monkeypatch.setattr(api, "validate_context", validate)
+    strategy = Strategy(State(), params=StrategyParams(**DATES), model=Model)
+    validate.assert_not_called()
+    parameters = StrategyAnalysisParams(**DATES)
+    result = empty_backtest(parameters)
+    run = Mock(return_value=result)
+    monkeypatch.setattr(api, "_run", run)
+
+    assert api.run_backtest(strategy.algos, strategy.ctx, parameters, settings=settings) is result
+    assert [call.args for call in validate.call_args_list] == [
+        (algo, strategy.ctx) for algo in strategy.algos
+    ]
+    run.assert_called_once()
+
+
 def test_run_backtest_validates_context_once_before_creating_engine(monkeypatch, settings):
     from scheme.execute.strategy import api
 
@@ -1081,10 +1116,194 @@ def test_risk_parity_accepts_numpy_real_signals(monkeypatch, scalar):
     assert target == {"000001.XSHE": pytest.approx(float(np.sign(scalar)) * 0.98)}
 
 
+@pytest.mark.parametrize("in_place", [False, True])
+def test_risk_parity_allocate_normalizes_symbol_aliases(monkeypatch, in_place):
+    from scheme.base.projects.optimize import default
+
+    allocator = default.RiskParity[State]()
+    allocator.ctx = State()
+    allocator.backtest = SimpleNamespace(time=pd.Timestamp("2025-01-02"))
+    history = pd.DataFrame({
+        "time": pd.to_datetime(["2024-12-30", "2024-12-31", "2025-01-01"]).repeat(2),
+        "code": ["000001.SZ", "600000.SH"] * 3,
+        "close": [100.0, 100.0, 99.0, 97.0, 99.99, 99.91], "adj_factor": [1.0] * 6,
+    })
+    query = Mock(side_effect=lambda _: nullcontext(SimpleNamespace(data=history.copy())))
+    monkeypatch.setattr(default, "query", query)
+    expected = allocator.allocate({"000001.XSHE": 1.0, "600000.XSHG": 1.0})
+    assert expected == pytest.approx({"000001.XSHE": 0.735, "600000.XSHG": 0.245}, abs=0.001)
+    signals = {"000001.SZ": 1.0, "600000.SH": 1.0}
+    if in_place:
+        allocator.ctx.signal = {}
+        allocator.ctx.signal.update(signals)
+        assert allocator.process()
+        actual = allocator.ctx.target
+        assert allocator.ctx.signal is None
+    else:
+        actual = allocator.allocate(signals)
+    assert actual == expected
+    assert allocator.diagnostics[-1]["method"] == "risk_parity"
+    assert query.call_args.args[0]["codes"] == ["000001.SZ", "600000.SH"]
+    assert signals == {"000001.SZ": 1.0, "600000.SH": 1.0}
+
+
+@pytest.mark.parametrize("in_place", [False, True])
+def test_risk_parity_allocate_rejects_duplicate_symbol_aliases(monkeypatch, in_place):
+    from scheme.base.projects.optimize import default
+
+    allocator = default.RiskParity[State]()
+    allocator.ctx = State()
+    query = Mock(side_effect=AssertionError("duplicate symbols must not query history"))
+    monkeypatch.setattr(default, "query", query)
+    signals = {"000001.SZ": 1.0, "000001.XSHE": 0.0}
+    if in_place:
+        allocator.ctx.signal = {}
+        allocator.ctx.signal.update(signals)
+    with pytest.raises(ValueError, match="证券代码规范化后重复"):
+        if in_place:
+            allocator.process()
+        else:
+            allocator.allocate(signals)
+    query.assert_not_called()
+
+
 def test_default_risk_parity_allows_zero_gross_exposure():
     from scheme.base.projects.optimize.default import OptimizeParams
 
     assert OptimizeParams(gross_exposure=0).gross_exposure == 0
+
+
+@pytest.fixture
+def default_control():
+    from scheme.base.projects.control.default import NoControl
+
+    control = NoControl[State]()
+    control.ctx = State()
+    control.backtest = SimpleNamespace(
+        time=pd.Timestamp("2025-01-02"), get_prices=Mock(return_value={}),
+        get_position=Mock(return_value={}), session=SimpleNamespace(run=Mock(return_value=100_000)),
+    )
+    return control
+
+
+@pytest.mark.parametrize("in_place", [False, True])
+def test_target_orders_normalizes_symbol_aliases(default_control, monkeypatch, in_place):
+    from scheme.base.projects.control import algo
+
+    warning = Mock()
+    monkeypatch.setattr(algo.log, "warning", warning)
+    default_control.backtest.get_prices.return_value = {"000001.XSHE": 10.0, "600000.XSHG": 20.0}
+    expected = default_control.target_orders({"000001.XSHE": 0.5, "600000.XSHG": -0.3})
+    target = {"000001.SZ": 0.5, "600000.SH": -0.3}
+    if in_place:
+        default_control.ctx.target = {}
+        default_control.ctx.target.update(target)
+        assert default_control.process()
+        actual = default_control.ctx.orders
+        assert default_control.ctx.target is None
+    else:
+        actual = default_control.target_orders(target)
+    assert actual == expected
+    assert [(order.symbol, order.quantity) for order in actual] == [
+        ("000001.XSHE", 5000), ("600000.XSHG", 1500),
+    ]
+    default_control.backtest.get_prices.assert_called_with(["000001.XSHE", "600000.XSHG"])
+    warning.assert_not_called()
+    assert target == {"000001.SZ": 0.5, "600000.SH": -0.3}
+
+
+@pytest.mark.parametrize("in_place", [False, True])
+def test_target_orders_rejects_duplicate_symbol_aliases(default_control, in_place):
+    target = {"000001.SZ": 0.5, "000001.XSHE": 0.0}
+    if in_place:
+        default_control.ctx.target = {}
+        default_control.ctx.target.update(target)
+    with pytest.raises(ValueError, match="证券代码规范化后重复"):
+        if in_place:
+            default_control.process()
+        else:
+            default_control.target_orders(target)
+    default_control.backtest.get_prices.assert_not_called()
+    default_control.backtest.get_position.assert_not_called()
+    default_control.backtest.session.run.assert_not_called()
+
+
+@pytest.mark.parametrize("price", [None, np.nan, np.inf, -np.inf, 0.0, -10.0])
+@pytest.mark.parametrize("position", [None, (300, 0), (0, 200), (300, 200)])
+def test_target_orders_skips_missing_prices_without_changing_positions(
+    default_control, monkeypatch, price, position,
+):
+    from backtest import Direction
+
+    from scheme.base.projects.control import algo
+
+    warning = Mock()
+    monkeypatch.setattr(algo.log, "warning", warning)
+    prices = {"600000.XSHG": 20.0}
+    if price is not None:
+        prices["000001.XSHE"] = price
+    positions = {"600000.XSHG": SimpleNamespace(longPosition=500, shortPosition=0)}
+    if position is not None:
+        positions["000001.XSHE"] = SimpleNamespace(
+            longPosition=position[0], shortPosition=position[1],
+        )
+    default_control.backtest.get_prices.return_value = prices
+    default_control.backtest.get_position.return_value = positions
+    orders = default_control.target_orders({"000001.XSHE": 0.5, "600000.XSHG": -0.3})
+    assert [(order.symbol, order.direction, order.quantity) for order in orders] == [
+        ("600000.XSHG", Direction.SELL_CLOSE, 500), ("600000.XSHG", Direction.SELL_OPEN, 1500),
+    ]
+    warning.assert_called_once()
+    assert warning.call_args.args[1] == 1
+    default_control.backtest.session.run.assert_called_once()
+    if position is not None:
+        assert vars(positions["000001.XSHE"]) == {
+            "longPosition": position[0], "shortPosition": position[1],
+        }
+
+
+def test_target_orders_without_any_valid_prices_only_warns_once(default_control, monkeypatch):
+    from scheme.base.projects.control import algo
+
+    warning = Mock()
+    monkeypatch.setattr(algo.log, "warning", warning)
+    default_control.backtest.get_position.return_value = {
+        "000001.XSHE": SimpleNamespace(longPosition=500, shortPosition=100),
+    }
+    assert default_control.target_orders({"000001.XSHE": 0.5, "600000.XSHG": -0.3}) == []
+    warning.assert_called_once()
+    assert warning.call_args.args[1] == 2
+    default_control.backtest.session.run.assert_not_called()
+
+
+def test_target_orders_still_closes_zero_and_omitted_targets(default_control):
+    from backtest import Direction
+
+    default_control.backtest.get_position.return_value = {
+        "000001.XSHE": SimpleNamespace(longPosition=300, shortPosition=0),
+        "600000.XSHG": SimpleNamespace(longPosition=0, shortPosition=200),
+    }
+    orders = default_control.target_orders({"000001.XSHE": 0.0})
+    assert [(order.symbol, order.direction, order.quantity) for order in orders] == [
+        ("000001.XSHE", Direction.SELL_CLOSE, 300), ("600000.XSHG", Direction.BUY_CLOSE, 200),
+    ]
+    default_control.backtest.get_prices.assert_not_called()
+    default_control.backtest.session.run.assert_not_called()
+
+
+@pytest.mark.parametrize("weight", [np.nan, np.inf, -np.inf])
+def test_target_orders_still_rejects_nonfinite_weights(default_control, weight):
+    with pytest.raises(ValueError, match="目标权重必须是有限数值"):
+        default_control.target_orders({"000001.SZ": weight})
+    default_control.backtest.get_prices.assert_not_called()
+
+
+@pytest.mark.parametrize("equity", [0.0, -1.0, np.nan, np.inf])
+def test_target_orders_still_rejects_invalid_equity(default_control, equity):
+    default_control.backtest.get_prices.return_value = {"000001.XSHE": 10.0}
+    default_control.backtest.session.run.return_value = equity
+    with pytest.raises(ValueError, match="账户权益必须为正数"):
+        default_control.target_orders({"000001.XSHE": 0.5})
 
 
 @pytest.mark.parametrize("base,field,method", [

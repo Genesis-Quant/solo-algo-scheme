@@ -3,16 +3,14 @@
 import importlib
 import importlib.metadata as metadata
 import re
-from typing import Any
 
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import Version
 
-from scheme.execute.strategy.assembly import parameter_type
 from scheme.log import get_logger
 
-from .schema import Component, Package
+from .schema import Package
 
 log = get_logger("scheme.task")
 
@@ -26,7 +24,7 @@ def installed_versions() -> dict[str, str]:
 def validate_scheme_requirement(
     requirements: list[str], version: Version, package_version: Version | None = None,
 ) -> None:
-    """仅接受同 major.minor 的完整 patch 范围；版本限 1–3 段正式数字版本。"""
+    """主、次版本一致，依赖范围包含系列起点、排除下一系列且满足当前 scheme。"""
     if any(
         not re.fullmatch(r"[0-9]+(?:\.[0-9]+){0,2}", str(value))
         for value in (version, package_version) if value is not None
@@ -36,24 +34,18 @@ def validate_scheme_requirement(
         package_version.major, package_version.minor
     ) != (version.major, version.minor):
         raise ValueError("研究包主版本和次版本必须与 scheme 一致")
-    parsed = [(text, Requirement(text)) for text in requirements]
-    candidates = [(text, r) for text, r in parsed if canonicalize_name(r.name) == "scheme"]
-    message = (
-        "研究包必须声明兼容 scheme 的唯一范围："
-        f">={version.major}.{version.minor}.0,<{version.major}.{version.minor + 1}.0"
-        "（无 URL、marker、extras）"
-    )
+    parsed = [Requirement(text) for text in requirements]
+    candidates = [r for r in parsed if canonicalize_name(r.name) == "scheme"]
+    minimum = Version(f"{version.major}.{version.minor}.0")
+    maximum = Version(f"{version.major}.{version.minor + 1}.0")
+    message = f"研究包必须声明兼容 scheme 的唯一范围：包含 {minimum} 且不包含 {maximum}"
     if len(candidates) != 1:
         raise ValueError(message)
-    text, requirement = candidates[0]
-    bounds = {specifier.operator: specifier.version for specifier in requirement.specifier}
-    # SpecifierSet 会去重；原始声明也只能包含两个边界。
-    if (requirement.url or requirement.marker or requirement.extras or text.count(",") != 1
-            or len(requirement.specifier) != 2 or set(bounds) != {">=", "<"}
-            or not all(re.fullmatch(r"[0-9]+(?:\.[0-9]+){0,2}", value) for value in bounds.values())
-            or Version(bounds[">="]) != Version(f"{version.major}.{version.minor}.0")
-            or Version(bounds["<"]) != Version(f"{version.major}.{version.minor + 1}.0")):
+    requirement = candidates[0]
+    if minimum not in requirement.specifier or maximum in requirement.specifier:
         raise ValueError(message)
+    if version not in requirement.specifier:
+        raise ValueError(f"当前 scheme {version} 不满足研究包依赖：{requirement}")
 
 
 def verify_component(component: Package) -> metadata.Distribution:
@@ -83,9 +75,3 @@ def load_component(component: Package, base: type) -> type:
     if not issubclass(cls, base):
         raise TypeError(f"{component.entry} 未继承当前 scheme 的 {base.__name__}")
     return cls
-
-
-def instantiate(component: Component, base: type) -> Any:
-    cls = load_component(component, base)
-    params = parameter_type(cls).model_validate(component.params)
-    return cls(params)

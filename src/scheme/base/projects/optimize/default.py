@@ -16,7 +16,7 @@ from scheme.base.internal.types import Signal, Target
 from scheme.base.projects.optimize import OptimizeAlgo
 from scheme.base.projects.optimize import OptimizeParams as BaseOptimizeParams
 from scheme.data import query
-from scheme.data.dolphindb.symbols import engine_symbol, source_symbol
+from scheme.data.dolphindb.symbols import engine_symbol, normalize_assets, source_symbol
 from scheme.log import get_logger
 
 __all__ = ["risk_parity", "OptimizeParams", "RiskParity"]
@@ -68,6 +68,7 @@ class RiskParity(OptimizeAlgo[OptimizeParams, C], Generic[C]):
         self.ctx.target = self.allocate(signals)
 
     def allocate(self, signals: Signal[Any]) -> Target:
+        signals = normalize_assets(signals)
         if any(not isinstance(s, Real) or not np.isfinite(s) for s in signals.values()):
             raise TypeError("默认风险平价接受有符号数值 Signal；其他值类型请提供自定义 Optimize")
         symbols = [s for s, value in signals.items() if value != 0]
