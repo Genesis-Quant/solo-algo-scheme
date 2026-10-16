@@ -1,4 +1,3 @@
-from datetime import timedelta
 from time import perf_counter
 from typing import Any, TypeVar
 
@@ -28,7 +27,7 @@ def prepare_panel(panel: pd.DataFrame, parameters: FactorAnalysisParams) -> pd.D
     )
     frame["time"] = pd.to_datetime(frame["time"])
     frame = frame[frame.time.between(
-        pd.Timestamp(parameters.start), pd.Timestamp(parameters.end), inclusive="left"
+        pd.Timestamp(parameters.start), pd.Timestamp(parameters.end), inclusive="both"
     )]
     if frame.empty:
         raise ValueError("因子面板为空")
@@ -84,7 +83,7 @@ def analyze_factors(
     settings = settings or DolphinSettings.from_env()
     started = perf_counter()
     log.info(
-        "因子分析：{} {} 至 {}（不含），因子列 {}，最大滞后 {}，隔夜/日内收益 {}，{} 组，{}",
+        "因子分析：{} {} 至 {}（含），因子列 {}，最大滞后 {}，隔夜/日内收益 {}，{} 组，{}",
         type(factor).__name__, parameters.start, parameters.end, ", ".join(parameters.columns),
         parameters.max_lag, ", ".join(parameters.return_columns), parameters.groups,
         "市值加权" if parameters.weight == "market_value" else "等权",
@@ -99,7 +98,7 @@ def analyze_factors(
         with query(
             {
                 "start_date": parameters.start.isoformat(),
-                "end_date": (parameters.end - timedelta(days=1)).isoformat(),
+                "end_date": parameters.end.isoformat(),
                 "codes": sorted(
                     {source_symbol(s) for s in source.code}
                     | {source_symbol(parameters.calendar_symbol)}
@@ -123,7 +122,8 @@ def analyze_factors(
                     "soloEngineCodes": np.asarray(codes),
                     "soloCalendarSymbol": source_symbol(parameters.calendar_symbol),
                     "soloStart": np.datetime64(parameters.start, "ms"),
-                    "soloEnd": np.datetime64(parameters.end, "ms"),
+                    # 底层执行统计按半开区间过滤；仅统计上界转换为末日次日。
+                    "soloEnd": np.datetime64(parameters.end, "ms") + np.timedelta64(1, "D"),
                 }
             )
             session.run(f"""

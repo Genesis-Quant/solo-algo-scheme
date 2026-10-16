@@ -604,7 +604,11 @@ def test_redeclared_platform_fields_are_validated_by_form():
     assert calls == [date(2023, 1, 1)]
 
 
-def test_real_cli_and_factor_freeze_keep_the_existing_wire_contract(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("validate_factor", [False, True])
+@pytest.mark.parametrize("end", ["2026-06-01", "2026-06-03"])
+def test_real_cli_and_factor_freeze_keep_dates_only_in_analysis(
+    tmp_path, monkeypatch, capsys, validate_factor, end,
+):
     from scheme.manage import main
 
     class RuntimeParams(FactorParams):
@@ -613,9 +617,18 @@ def test_real_cli_and_factor_freeze_keep_the_existing_wire_contract(tmp_path, mo
     class Analysis(RuntimeParams, FactorAnalysisParams):
         columns: list[str] = Field(default_factory=lambda: ["momentum"], min_length=1)
 
+    calls = []
+
     class CustomFactor(Factor[RuntimeParams]):
+        def __init__(self, params):
+            calls.append(("init", params))
+            super().__init__(params)
+
         def compute(self, start, end):
             raise AssertionError("form tests must not compute")
+
+        def validate(self, start, end, n_sample=5):
+            calls.append(("validate", start, end, n_sample))
 
     class Form(FactorReportForm[Analysis]):
         pass
@@ -631,14 +644,36 @@ def test_real_cli_and_factor_freeze_keep_the_existing_wire_contract(tmp_path, mo
     definition = json.loads(capsys.readouterr().out)
     assert definition["protocol"] == 2
     assert definition["values"]["form"]["days"] == 20
-    values = {**definition["values"]["form"], "days": 30, "pool": StockPool.CSI500}
+    assert calls == []
+    values = {
+        **definition["values"]["form"], "days": 30, "pool": StockPool.CSI500,
+        "start": "2026-06-01", "end": end,
+    }
     monkeypatch.setattr(sys, "stdin", StringIO(json.dumps({"form": values})))
-    assert main(["parameters", "--project", str(tmp_path), "--validate"]) == 0
+    arguments = ["parameters", "--project", str(tmp_path), "--validate"]
+    if validate_factor:
+        arguments.append("--validate-factor")
+    assert main(arguments) == 0
     payload = json.loads(capsys.readouterr().out)
     assert set(payload) == {"entry", "factor", "analysis"}
+    assert set(payload["factor"]) == {"universe", "window"}
     assert payload["factor"]["window"] == 30
     assert "window" not in payload["analysis"]
+    assert payload["analysis"]["start"] == "2026-06-01"
+    assert payload["analysis"]["end"] == end
     assert payload["factor"]["universe"] == payload["analysis"]["universe"] == {"pool": "中证 500"}
+    if validate_factor:
+        assert len(calls) == 2
+        assert calls[0][0] == "init"
+        assert type(calls[0][1]) is RuntimeParams
+        assert calls[0][1].window == 30
+        assert calls[1] == ("validate", date(2026, 6, 1), date.fromisoformat(end), 5)
+    else:
+        assert calls == []
     assert Form.model_validate(values).build().universe.pool == StockPool.CSI500
+    before = list(calls)
     with pytest.raises(ValidationError, match="extra_forbidden"):
-        inspect_project(tmp_path, {"form": {**values, "window": 6}})
+        inspect_project(
+            tmp_path, {"form": {**values, "window": 6}}, validate_factor=validate_factor,
+        )
+    assert calls == before

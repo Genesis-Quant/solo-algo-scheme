@@ -17,7 +17,7 @@ def run(data: dict[str, Any]) -> int:
     versions = installed_versions()
     factor = load_component(task.factor, Factor)
     log.info("加载因子：{} {}（{}）", task.factor.package, task.factor.version, task.factor.entry)
-    shared = {name: getattr(task.analysis, name) for name in ("start", "end", "universe")}
+    shared = {"universe": task.analysis.universe}
     params = project_parameters(parameter_type(factor), task.factor.params, overrides=shared)
     task.factor.params = params.model_dump(mode="json")
     result = analyze_factors(factor(params), task.analysis)

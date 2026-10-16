@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Literal, Self, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from scheme.base.internal.params import validate_research
 from scheme.data.dolphindb.symbols import engine_symbol
 from scheme.data.dolphindb.universe import Universe
 
@@ -21,23 +20,18 @@ P = TypeVar("P", bound="FactorParams")
 
 
 class FactorParams(BaseModel):
-    """构造因子所需的参数，不包含报告分析选项。"""
+    """构造因子所需的股票池及算法参数，不包含日期或报告分析选项。"""
 
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
-    start: date = Field(title="开始日期")
-    end: date = Field(title="结束日期（不含）")
     universe: Universe = Field(default_factory=Universe, title="股票池设置")
-
-    @model_validator(mode="after")
-    def validate_research(self) -> Self:
-        validate_research(self.start, self.end)
-        return self
 
 
 class FactorAnalysisParams(FactorParams):
-    """因子参数加评价设置；填写后通过 run(Factor) 生成报告。"""
+    """因子参数加闭区间日期及评价设置；通过 run(Factor) 生成报告。"""
 
+    start: date = Field(title="开始日期")
+    end: date = Field(title="结束日期（含）")
     columns: list[str] = Field(min_length=1, title="因子列")
     max_lag: int = Field(default=1, ge=1, strict=True, title="最大滞后阶数（交易日）")
     groups: int = Field(default=5, ge=2, title="分组数量")
@@ -47,6 +41,12 @@ class FactorAnalysisParams(FactorParams):
         json_schema_extra={"x-enum-labels": ["等权", "市值加权"]},
     )
     calendar_symbol: str = Field(default="000300.XSHG", title="交易日历代码")
+
+    @model_validator(mode="after")
+    def validate_research(self) -> Self:
+        if self.start > self.end:
+            raise ValueError("日期区间必须满足 start <= end，采用 [start, end]")
+        return self
 
     @model_validator(mode="after")
     def validate_analysis(self) -> Self:

@@ -1,10 +1,11 @@
-"""项目表单发现与冻结参数序列化；不运行算法或研究任务。"""
+"""项目表单与冻结参数协议；因子保存校验使用离线替身，不运行研究任务。"""
 
 import json
 import sys
 from datetime import date
 from io import StringIO
 from types import ModuleType, SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field, ValidationError
@@ -60,26 +61,100 @@ class CustomForm(ReportForm[CustomAnalysis]):
         return CustomAnalysis(**self.model_dump(), columns=["f"])
 
 
-def test_direct_generic_form_preserves_custom_factor_runtime_fields(project):
+@pytest.mark.parametrize("end", ["2026-06-01", "2026-06-03"])
+def test_direct_generic_form_preserves_custom_factor_runtime_fields(project, monkeypatch, end):
     directory, module = project
     module.Factor, module.FactorReportForm = CustomFactor, CustomForm
+    construct = Mock(side_effect=AssertionError("schema inspection must not instantiate a factor"))
+    monkeypatch.setattr(CustomFactor, "__init__", construct)
     definition = inspect_project(directory)
     assert definition["protocol"] == 2
     assert set(definition["schemas"]) == {"form"}
     assert set(definition["schemas"]["form"]["required"]) == {"start", "end", "window"}
     assert definition["values"] == {"form": {}}
     payload = inspect_project(directory, {"form": {
-        "start": "2026-06-01", "end": "2026-06-03", "window": 17,
+        "start": "2026-06-01", "end": end, "window": 17,
     }})
     assert set(payload) == {"entry", "factor", "analysis"}
     assert payload["entry"] == f"{module.__name__}:Factor"
-    assert set(payload["factor"]) == {"start", "end", "universe", "window"}
+    assert set(payload["factor"]) == {"universe", "window"}
     assert RuntimeParams.model_validate(payload["factor"]).window == 17
     canonical = FactorAnalysisParams.model_validate(payload["analysis"])
     assert canonical.columns == ["f"]
+    assert (canonical.start, canonical.end) == (date(2026, 6, 1), date.fromisoformat(end))
     assert "window" not in payload["analysis"]
-    for name in ("start", "end", "universe"):
-        assert payload["factor"][name] == payload["analysis"][name]
+    assert payload["factor"]["universe"] == payload["analysis"]["universe"]
+    construct.assert_not_called()
+
+
+@pytest.mark.parametrize("end", ["2026-06-01", "2026-06-03"])
+def test_save_factor_validation_instantiates_concrete_runtime_once(project, end):
+    directory, module = project
+    calls = []
+
+    class ValidatingFactor(CustomFactor):
+        def __init__(self, params):
+            assert type(params) is RuntimeParams
+            assert set(params.model_dump()) == {"universe", "window"}
+            calls.append(("init", params))
+            super().__init__(params)
+
+        def validate(self, start, end, n_sample=5):
+            calls.append(("validate", start, end, n_sample))
+
+    module.Factor, module.FactorReportForm = ValidatingFactor, CustomForm
+    payload = inspect_project(directory, {"form": {
+        "start": "2026-06-01", "end": end, "window": 17,
+    }}, validate_factor=True)
+    assert len(calls) == 2
+    assert calls[0][0] == "init"
+    assert calls[0][1].window == 17
+    assert calls[1] == ("validate", date(2026, 6, 1), date.fromisoformat(end), 5)
+    assert payload["factor"] == calls[0][1].model_dump(mode="json")
+    assert payload["analysis"]["start"] == "2026-06-01"
+    assert payload["analysis"]["end"] == end
+
+
+@pytest.mark.parametrize("form", [
+    {},
+    {"start": "2026-06-01", "end": "2026-06-03", "window": 0},
+    {"start": "2026-06-03", "end": "2026-06-01", "window": 17},
+])
+def test_save_factor_validation_rejects_invalid_form_before_instantiation(project, monkeypatch, form):
+    directory, module = project
+    module.Factor, module.FactorReportForm = CustomFactor, CustomForm
+    construct = Mock(side_effect=AssertionError("invalid form instantiated a factor"))
+    monkeypatch.setattr(CustomFactor, "__init__", construct)
+    with pytest.raises(ValidationError):
+        inspect_project(directory, {"form": form}, validate_factor=True)
+    construct.assert_not_called()
+
+
+def test_save_factor_validation_rejects_runtime_projection_before_instantiation(project, monkeypatch):
+    from pydantic import field_validator
+
+    directory, module = project
+
+    class EvenRuntimeParams(RuntimeParams):
+        @field_validator("window")
+        @classmethod
+        def even_window(cls, value):
+            if value % 2:
+                raise ValueError("runtime window must be even")
+            return value
+
+    class EvenFactor(Factor[EvenRuntimeParams]):
+        def compute(self, start, end):
+            raise AssertionError("invalid runtime params must not compute")
+
+    module.Factor, module.FactorReportForm = EvenFactor, CustomForm
+    construct = Mock(side_effect=AssertionError("invalid runtime params instantiated a factor"))
+    monkeypatch.setattr(EvenFactor, "__init__", construct)
+    with pytest.raises(ValidationError, match="runtime window must be even"):
+        inspect_project(directory, {"form": {
+            "start": "2026-06-01", "end": "2026-06-03", "window": 17,
+        }}, validate_factor=True)
+    construct.assert_not_called()
 
 
 @pytest.mark.parametrize("alias", [
@@ -231,6 +306,125 @@ def test_manage_cli_keeps_single_generic_form_protocol(project, monkeypatch, cap
     assert payload["factor"]["window"] == 17
 
 
+def test_manage_cli_save_factor_validation_uses_analysis_dates_once(project, monkeypatch, capsys):
+    from scheme.manage import main
+
+    directory, module = project
+    calls = []
+
+    class ValidatingFactor(CustomFactor):
+        def validate(self, start, end, n_sample=5):
+            print("user factor validation output")
+            calls.append((self.params, start, end, n_sample))
+
+    module.Factor, module.FactorReportForm = ValidatingFactor, CustomForm
+    monkeypatch.setattr(sys, "stdin", StringIO(json.dumps({"form": {
+        "start": "2026-06-01", "end": "2026-06-01", "window": 17,
+    }})))
+    assert main([
+        "parameters", "--project", str(directory), "--validate", "--validate-factor",
+    ]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out.splitlines()[0] == "user factor validation output"
+    payload = json.loads(captured.out.splitlines()[-1])
+    assert len(calls) == 1
+    params, start, end, n_sample = calls[0]
+    assert type(params) is RuntimeParams
+    assert (start, end, n_sample) == (date(2026, 6, 1), date(2026, 6, 1), 5)
+    assert payload["factor"] == params.model_dump(mode="json")
+    assert payload["analysis"]["start"] == payload["analysis"]["end"] == "2026-06-01"
+
+
+def test_manage_cli_factor_validation_failure_is_nonzero_without_success_payload(
+    project, monkeypatch, capsys,
+):
+    from scheme.manage import main
+
+    directory, module = project
+    calls = []
+
+    class InconsistentFactor(CustomFactor):
+        def validate(self, start, end, n_sample=5):
+            calls.append((start, end, n_sample))
+            print("user factor validation output")
+            raise ValueError("factor differs on sampled date")
+
+    module.Factor, module.FactorReportForm = InconsistentFactor, CustomForm
+    monkeypatch.setattr(sys, "stdin", StringIO(json.dumps({"form": {
+        "start": "2026-06-01", "end": "2026-06-03", "window": 17,
+    }})))
+    assert main([
+        "parameters", "--project", str(directory), "--validate", "--validate-factor",
+    ]) == 1
+    captured = capsys.readouterr()
+    assert calls == [(date(2026, 6, 1), date(2026, 6, 3), 5)]
+    assert captured.err == "ValueError: factor differs on sampled date\n"
+    assert captured.out == "user factor validation output\n"
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(captured.out.splitlines()[-1])
+
+
+@pytest.mark.parametrize("stdin", ["null", "[]", "0", "{invalid json"])
+def test_manage_cli_factor_validation_rejects_non_form_json_without_success_payload(
+    project, monkeypatch, capsys, stdin,
+):
+    from scheme.manage import main
+
+    directory, _ = project
+    inspect = Mock(side_effect=AssertionError("invalid JSON inspected a project"))
+    monkeypatch.setattr("scheme.manage.parameters.inspect_project", inspect)
+    monkeypatch.setattr(sys, "stdin", StringIO(stdin))
+    assert main([
+        "parameters", "--project", str(directory), "--validate", "--validate-factor",
+    ]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err
+    inspect.assert_not_called()
+
+
+def test_manage_cli_factor_validation_requires_method_without_legacy_fallback(
+    project, monkeypatch, capsys,
+):
+    from scheme.manage import main
+
+    directory, module = project
+    module.Factor, module.FactorReportForm = CustomFactor, CustomForm
+    monkeypatch.delattr(Factor, "validate")
+    monkeypatch.setattr(sys, "stdin", StringIO(json.dumps({"form": {
+        "start": "2026-06-01", "end": "2026-06-03", "window": 17,
+    }})))
+    assert main([
+        "parameters", "--project", str(directory), "--validate", "--validate-factor",
+    ]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "AttributeError" in captured.err
+    assert "validate" in captured.err
+
+
+@pytest.mark.parametrize("arguments", [
+    ["parameters", "--validate-factor"],
+    ["run", "--validate-factor"],
+    ["run", "--validate", "--validate-factor"],
+])
+def test_manage_cli_factor_validation_requires_parameters_json_validation(
+    monkeypatch, capsys, arguments,
+):
+    from scheme.manage import main
+
+    inspect = Mock(side_effect=AssertionError("invalid flag combination inspected a project"))
+    monkeypatch.setattr("scheme.manage.parameters.inspect_project", inspect)
+    with pytest.raises(SystemExit) as error:
+        main(arguments)
+    assert error.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--validate-factor 仅可与 parameters --validate" in captured.err
+    inspect.assert_not_called()
+
+
 @pytest.mark.parametrize("updates", [{}, {"window": 0}])
 def test_required_custom_factor_field_is_validated(project, updates):
     directory, module = project
@@ -279,8 +473,11 @@ def test_form_must_declare_report_form_analysis_generic(project, base):
         inspect_project(directory)
 
 
-def test_unrepresentable_factor_analysis_fields_fail_clearly(project):
+@pytest.mark.parametrize("validate_factor", [False, True])
+def test_unrepresentable_factor_analysis_fields_fail_clearly(project, monkeypatch, validate_factor):
     directory, module = project
+    construct = Mock(side_effect=AssertionError("unsupported analysis instantiated a factor"))
+    monkeypatch.setattr(CustomFactor, "__init__", construct)
 
     class UnsupportedAnalysis(CustomAnalysis):
         evaluator: str
@@ -294,9 +491,11 @@ def test_unrepresentable_factor_analysis_fields_fail_clearly(project):
 
     module.Factor, module.FactorReportForm = CustomFactor, UnsupportedForm
     with pytest.raises(ValueError, match="自定义字段.*evaluator"):
-        inspect_project(directory, {"form": {}})
+        inspect_project(directory, {"form": {}}, validate_factor=validate_factor)
+    construct.assert_not_called()
 
 
+@pytest.mark.parametrize("validate_factor", [False, True])
 @pytest.mark.parametrize("kind,algo,analysis_type", [
     ("model", ModelAlgo, ModelAnalysisParams),
     ("optimize", OptimizeAlgo, OptimizeAnalysisParams),
@@ -304,9 +503,11 @@ def test_unrepresentable_factor_analysis_fields_fail_clearly(project):
     ("execution", ExecutionAlgo, ExecutionAnalysisParams),
 ])
 def test_direct_stage_form_keeps_backtest_wire_shape(
-    project, monkeypatch, kind, algo, analysis_type,
+    project, monkeypatch, kind, algo, analysis_type, validate_factor,
 ):
     directory, module = project
+    construct = Mock(side_effect=AssertionError("stage project instantiated a factor"))
+    monkeypatch.setattr(Factor, "__init__", construct)
     stages = ("model", "optimize", "control", "execution")
     selectors = {name: f"{name}_example:{name.title()}Algo"
                  for name in stages[:stages.index(kind)]}
@@ -329,7 +530,8 @@ def test_direct_stage_form_keeps_backtest_wire_shape(
     monkeypatch.setattr("scheme.execute.strategy.components.research_components", components)
     payload = inspect_project(directory, {"form": {
         "start": "2026-06-01", "end": "2026-06-03",
-    }})
+    }}, validate_factor=validate_factor)
+    construct.assert_not_called()
     assert set(payload) == {"entry", "project_kind", "upstream", "backtest"}
     assert payload["entry"] == f"{module.__name__}:{algo.__name__}"
     assert payload["project_kind"] == kind

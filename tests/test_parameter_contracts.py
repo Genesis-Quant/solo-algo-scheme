@@ -63,7 +63,7 @@ STAGES = (
 )
 FORMS = ((FactorParams, FactorAnalysisParams, FactorReportForm, {"columns": ["f"]}), *STAGES)
 PARAMETERS = (
-    (FactorParams, {}), (FactorAnalysisParams, {"columns": ["f"]}),
+    (FactorAnalysisParams, {"columns": ["f"]}),
     (StrategyParams, {}), (StrategyAnalysisParams, {}),
     *((analysis, selectors) for _, analysis, _, selectors in STAGES),
 )
@@ -138,11 +138,30 @@ def test_runtime_dates_are_required_validated_and_round_trip(model, values):
             model.model_validate({k: v for k, v in {**DATES, **values}.items() if k != missing})
         assert any(item["loc"] == (missing,) and item["type"] == "missing"
                    for item in error.value.errors())
-    for end in ("2025-01-01", "2024-12-31"):
-        with pytest.raises(ValidationError, match="start < end"):
+    invalid_ends = ("2024-12-31",) if model is FactorAnalysisParams else (
+        "2025-01-01", "2024-12-31",
+    )
+    for end in invalid_ends:
+        with pytest.raises(ValidationError, match="start <=? end"):
             model.model_validate({**DATES, **values, "end": end})
     with pytest.raises(ValidationError, match="start"):
         model.model_validate({**DATES, **values, "start": "not-a-date"})
+
+
+def test_factor_dates_belong_only_to_closed_interval_analysis():
+    params = FactorParams()
+    assert params.universe == Universe()
+    assert set(params.model_dump()) == {"universe"}
+    assert FactorParams.model_validate_json(params.model_dump_json()) == params
+    with pytest.raises(ValidationError) as error:
+        FactorParams(**DATES)
+    assert {(item["loc"], item["type"]) for item in error.value.errors()} == {
+        (("start",), "extra_forbidden"), (("end",), "extra_forbidden"),
+    }
+    assert {"start", "end"} <= set(FactorAnalysisParams.__annotations__)
+    assert FactorAnalysisParams.model_fields["end"].title == "结束日期（含）"
+    analysis = FactorAnalysisParams(start="2025-01-01", end="2025-01-01", columns=["f"])
+    assert analysis.start == analysis.end == date(2025, 1, 1)
 
 
 @pytest.mark.parametrize("analysis,selectors", [
@@ -161,7 +180,7 @@ def test_factor_and_strategy_runtime_models_are_independent_direct_models():
     assert StrategyParams.__bases__ == (BaseModel,)
     assert FactorAnalysisParams.__bases__ == (FactorParams,)
     assert StrategyAnalysisParams.__bases__ == (StrategyParams,)
-    assert set(FactorParams.model_fields) == {"start", "end", "universe"}
+    assert set(FactorParams.model_fields) == {"universe"}
     assert set(StrategyParams.model_fields) == {"start", "end", "universe"}
     assert set(FactorParams.__annotations__) == set(FactorParams.model_fields)
     assert set(StrategyParams.__annotations__) == set(StrategyParams.model_fields)
@@ -255,11 +274,17 @@ def test_factor_form_defaults_match_web_research_settings():
 def test_form_cross_field_dates_are_validated_by_build_not_constructor(
     runtime, analysis, form, values,
 ):
-    for end in ("2025-01-01", "2024-12-31"):
+    invalid_ends = ("2024-12-31",) if analysis is FactorAnalysisParams else (
+        "2025-01-01", "2024-12-31",
+    )
+    for end in invalid_ends:
         pending = form.model_validate({**DATES, **values, "end": end})
         assert pending.end == date.fromisoformat(end)
-        with pytest.raises(ValidationError, match="start < end"):
+        with pytest.raises(ValidationError, match="start <=? end"):
             pending.build()
+    if analysis is FactorAnalysisParams:
+        built = form.model_validate({**DATES, **values, "end": DATES["start"]}).build()
+        assert built.start == built.end == date(2025, 1, 1)
 
 
 @pytest.mark.parametrize(
@@ -314,11 +339,13 @@ def test_stage_extras_are_ignored_at_runtime_but_preserved_for_analysis(
     assert params.model_json_schema()["additionalProperties"] is True
 
 
-@pytest.mark.parametrize("model,values", [(FactorParams, {}), (FactorAnalysisParams, {"columns": ["f"]})])
+@pytest.mark.parametrize("model,values", [
+    (FactorParams, {}), (FactorAnalysisParams, {**DATES, "columns": ["f"]}),
+])
 def test_factor_params_forbid_undeclared_fields(model, values):
     assert model.model_config["extra"] == "forbid"
     with pytest.raises(ValidationError) as error:
-        model.model_validate({**DATES, **values, "window": 20})
+        model.model_validate({**values, "window": 20})
     assert any(item["loc"] == ("window",) and item["type"] == "extra_forbidden"
                for item in error.value.errors())
 
@@ -361,7 +388,7 @@ def test_direct_custom_factor_form_builds_exact_analysis_and_projects_runtime(mo
     assert received is analysis
     assert type(factor.params) is WindowParams
     assert factor.params.window == 7
-    assert set(factor.params.model_dump()) == {"start", "end", "universe", "window"}
+    assert set(factor.params.model_dump()) == {"universe", "window"}
     assert type(result.parameters) is WindowAnalysis
     assert result.parameters == analysis
     analysis.columns.append("changed")
@@ -431,7 +458,9 @@ def test_projection_reconstructs_declared_model_instead_of_leaking_subclass():
     base = project_parameters(FactorParams, analysis)
     assert_type(base, FactorParams)
     assert type(base) is FactorParams
-    assert set(base.model_dump()) == {"start", "end", "universe"}
+    assert set(base.model_dump()) == {"universe"}
+    assert not hasattr(runtime, "start")
+    assert not hasattr(runtime, "end")
 
 
 def test_projection_excludes_analysis_extras_even_for_allow_runtime_model():
@@ -596,7 +625,7 @@ def test_unparameterized_factor_mixin_does_not_hide_concrete_parameters():
 
     for cls in (Concrete, Leaf):
         assert parameter_type(cls) is WindowParams
-        params = WindowParams(**DATES, window=20)
+        params = WindowParams(window=20)
         assert cls(params).params is params
     with pytest.raises(TypeError, match="BaseModel 参数泛型"):
         parameter_type(FactorMixin)

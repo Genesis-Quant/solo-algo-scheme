@@ -101,7 +101,7 @@ def settings():
 
 def test_factor_preserves_panel_values():
     parameters = FactorAnalysisParams(**DATES, columns=["f"], max_lag=1, groups=2)
-    panel = ExampleFactor(FactorParams(**DATES)).compute(parameters.start, parameters.end)
+    panel = ExampleFactor(FactorParams()).compute(parameters.start, parameters.end)
     source = prepare_panel(panel, parameters)
     assert source.f.tolist() == [1.0, 2.0]
     assert source.code.tolist() == ["000001.XSHE", "600000.XSHG"]
@@ -109,13 +109,13 @@ def test_factor_preserves_panel_values():
 
 def test_factor_rejects_duplicate_panel():
     params = FactorAnalysisParams(**DATES, columns=["f"])
-    panel = ExampleFactor(FactorParams(**DATES)).compute(params.start, params.end)
+    panel = ExampleFactor(FactorParams()).compute(params.start, params.end)
     with pytest.raises(ValueError, match="唯一"):
         prepare_panel(pd.concat([panel, panel]), params)
 
 
-@pytest.mark.parametrize("day", ["2024-12-31", "2025-01-03"])
-def test_factor_panel_uses_half_open_dates(day):
+@pytest.mark.parametrize("day", ["2024-12-31", "2025-01-04"])
+def test_factor_panel_rejects_dates_outside_closed_interval(day):
     params = FactorAnalysisParams(**DATES, columns=["f"])
     panel = pd.DataFrame(
         {"f": [1.0]},
@@ -126,15 +126,30 @@ def test_factor_panel_uses_half_open_dates(day):
         prepare_panel(panel, params)
     source = prepare_panel(pd.concat([
         panel,
-        ExampleFactor(FactorParams(**DATES)).compute(params.start, params.end),
+        ExampleFactor(FactorParams()).compute(params.start, params.end),
     ]), params)
     assert source.time.tolist() == [pd.Timestamp(DATES["start"])] * 2
     assert source.f.tolist() == [1.0, 2.0]
 
 
+@pytest.mark.parametrize("start,end", [
+    ("2025-01-01", "2025-01-03"), ("2025-01-03", "2025-01-03"),
+])
+def test_factor_panel_includes_both_closed_interval_boundaries(start, end):
+    params = FactorAnalysisParams(start=start, end=end, columns=["f"])
+    dates = pd.to_datetime(["2024-12-31", "2025-01-01", "2025-01-03", "2025-01-04"])
+    panel = pd.DataFrame(
+        {"f": [0.0, 1.0, 2.0, 3.0]},
+        index=pd.MultiIndex.from_product([dates, ["000001.XSHE"]], names=["date", "symbol"]),
+    )
+    source = prepare_panel(panel, params)
+    expected = dates[(dates >= pd.Timestamp(start)) & (dates <= pd.Timestamp(end))]
+    assert source.time.tolist() == expected.tolist()
+
+
 def test_factor_panel_converts_numeric_values_without_coercing_invalid_input():
     params = FactorAnalysisParams(**DATES, columns=["f"])
-    panel = ExampleFactor(FactorParams(**DATES)).compute(params.start, params.end)
+    panel = ExampleFactor(FactorParams()).compute(params.start, params.end)
     panel["f"] = ["1.25", "2"]
     assert prepare_panel(panel, params).f.tolist() == [1.25, 2.0]
     panel.loc[:, "f"] = "not-a-number"
@@ -157,13 +172,44 @@ def test_factor_returns_are_read_only_until_end(monkeypatch, settings, max_lag):
     monkeypatch.setattr("scheme.execute.factor.api.create_session", lambda _: nullcontext(object()))
     params = FactorAnalysisParams(**DATES, columns=["f"], max_lag=max_lag)
     with pytest.raises(Stop):
-        analyze_factors(ExampleFactor(FactorParams(**DATES)), params, settings=settings)
-    assert (requests[0]["start_date"], requests[0]["end_date"]) == ("2025-01-01", "2025-01-02")
+        analyze_factors(ExampleFactor(FactorParams()), params, settings=settings)
+    assert (requests[0]["start_date"], requests[0]["end_date"]) == ("2025-01-01", "2025-01-03")
     assert list(requests[0]["derivatives"]) == ["adjusted_open", "adjusted_close", *params.return_columns]
     from runtime.apps.query import FactorQuery
 
     validated = FactorQuery.model_validate(requests[0])
     assert set(validated.source_factors()) == {"open", "close", "adj_factor"}
+
+
+@pytest.mark.parametrize("start", ["2025-01-01", "2025-01-03"])
+def test_factor_analysis_keeps_closed_end_in_source_query_and_statistics(monkeypatch, settings, start):
+    from scheme.execute.factor import api
+
+    params = FactorAnalysisParams(start=start, end="2025-01-03", columns=["f"])
+    panel = pd.DataFrame(
+        {"f": [1.0, 2.0]},
+        index=pd.MultiIndex.from_product(
+            [pd.to_datetime(["2025-01-01", "2025-01-03"]), ["000001.XSHE"]],
+            names=["date", "symbol"],
+        ),
+    )
+    factor = Mock(spec=ExampleFactor)
+    factor.compute.return_value = panel
+    session = SimpleNamespace(run=Mock(return_value=pd.DataFrame()), upload=Mock())
+    request = Mock(return_value=nullcontext(SimpleNamespace(data_ref="offlineReturns")))
+    monkeypatch.setattr(api, "create_session", lambda _: nullcontext(session))
+    monkeypatch.setattr(api, "query", request)
+
+    analyze_factors(factor, params, settings=settings)
+    factor.compute.assert_called_once_with(params.start, params.end)
+    assert request.call_args.args[0]["start_date"] == start
+    assert request.call_args.args[0]["end_date"] == "2025-01-03"
+    uploaded = session.upload.call_args.args[0]
+    assert uploaded["soloStart"] == np.datetime64(params.start, "ms")
+    assert uploaded["soloEnd"] == np.datetime64("2025-01-04", "ms")
+    assert uploaded["soloFactorSource"].time.max() == pd.Timestamp(params.end)
+    assert len(uploaded["soloFactorSource"]) == (2 if start == "2025-01-01" else 1)
+    assert any("soloStart, soloEnd" in call.args[0] for call in session.run.call_args_list)
 
 
 def test_factor_report_form_build_and_run(monkeypatch, settings):
@@ -187,13 +233,14 @@ def test_factor_report_form_build_and_run(monkeypatch, settings):
     assert analysis is params
     assert analyze.call_args.kwargs == {"settings": settings}
     assert type(factor.params) is FactorParams
-    assert set(factor.params.model_dump()) == {"start", "end", "universe"}
+    assert set(factor.params.model_dump()) == {"universe"}
+    assert not hasattr(factor, "universe")
     assert factor.params.universe == params.universe
     assert type(result.parameters) is FactorAnalysisParams
     assert result.parameters == params
     assert not hasattr(params, "factor_params")
     with pytest.raises(TypeError, match="Factor 类"):
-        params.run(ExampleFactor(FactorParams(**DATES)))
+        params.run(ExampleFactor(FactorParams()))
     with pytest.raises(TypeError, match="Factor 类"):
         params.run(ModelAlgo)
     assert analyze.call_count == 1
@@ -982,24 +1029,24 @@ def frozen_factor_task(tmp_path, monkeypatch):
     return task, data, Parameters, FrozenFactor, spies, versions, report
 
 
-@pytest.mark.parametrize("conflicting_runtime", [False, True])
+@pytest.mark.parametrize("conflicting_universe", [False, True])
 def test_frozen_factor_task_keeps_custom_runtime_without_analysis_leak(
-    frozen_factor_task, conflicting_runtime,
+    frozen_factor_task, conflicting_universe,
 ):
     task, data, model, factor_type, spies, versions, report = frozen_factor_task
-    if conflicting_runtime:
-        data["factor"]["params"].update(
-            start="2024-01-01", end="2024-02-01", universe={"pool": StockPool.CSI300},
-        )
+    if conflicting_universe:
+        data["factor"]["params"]["universe"] = {"pool": StockPool.CSI300}
     original = deepcopy(data)
     assert task.run(data) == 0
     factor, analysis = spies["analyze_factors"].call_args.args
     assert type(factor) is factor_type
     assert type(factor.params) is model
     assert factor.params.window == 17
-    assert set(factor.params.model_dump()) == {"start", "end", "universe", "window"}
-    for name in ("start", "end", "universe"):
-        assert getattr(factor.params, name) == getattr(analysis, name)
+    assert set(factor.params.model_dump()) == {"universe", "window"}
+    assert not hasattr(factor.params, "start")
+    assert not hasattr(factor.params, "end")
+    assert (analysis.start, analysis.end) == (date(2025, 1, 1), date(2025, 1, 3))
+    assert factor.params.universe == analysis.universe
     assert type(analysis) is FactorAnalysisParams
     assert not hasattr(analysis, "window")
     saved, saved_report, saved_versions = spies["save_run"].call_args.args
@@ -1035,12 +1082,14 @@ def test_frozen_factor_task_accepts_canonical_and_alias_runtime_fields(
     assert spies["save_run"].call_args.args[0].factor.params["window"] == 17
 
 
-@pytest.mark.parametrize("alias", ["begin", AliasChoices("begin", "from_date"), AliasPath("dates", "begin")])
-def test_frozen_factor_analysis_overrides_shared_field_aliases(frozen_factor_task, alias):
+@pytest.mark.parametrize("alias", [
+    "pool_settings", AliasChoices("pool_settings", "selection"), AliasPath("shared", "universe"),
+])
+def test_frozen_factor_analysis_overrides_only_shared_universe_aliases(frozen_factor_task, alias):
     task, data, _, _, spies, _, _ = frozen_factor_task
 
     class Parameters(FactorParams):
-        start: date = Field(validation_alias=alias)
+        universe: Universe = Field(validation_alias=alias)
 
     class AliasedFactor(Factor[Parameters]):
         def compute(self, start: date, end: date) -> pd.DataFrame:
@@ -1048,12 +1097,15 @@ def test_frozen_factor_analysis_overrides_shared_field_aliases(frozen_factor_tas
 
     spies["load_component"].return_value = AliasedFactor
     data["factor"]["params"] = {
-        "begin": "2024-01-01", "from_date": "2023-01-01", "dates": {"begin": "2022-01-01"},
+        "pool_settings": {"pool": StockPool.CSI300}, "selection": {"pool": StockPool.CSI500},
+        "shared": {"universe": {"pool": StockPool.SSE50}},
     }
     original = deepcopy(data)
     assert task.run(data) == 0
     factor, analysis = spies["analyze_factors"].call_args.args
-    assert factor.params.start == analysis.start == date(2025, 1, 1)
+    assert factor.params.universe == analysis.universe
+    assert set(factor.params.model_dump()) == {"universe"}
+    assert (analysis.start, analysis.end) == (date(2025, 1, 1), date(2025, 1, 3))
     assert data == original
 
 

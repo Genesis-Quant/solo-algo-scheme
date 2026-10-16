@@ -47,8 +47,8 @@ scheme/
 
 参数按三层职责组织：
 
-- `FactorParams`、`StrategyParams` 是构造因子和组装策略需要的运行参数，包含 `start`、`end`、`universe`。四类 Algo 的 Params 只声明自身算法字段，从统一策略参数提取，不携带回测配置。
-- `FactorAnalysisParams(FactorParams)` 增加 `columns`、`max_lag` 等分析选项，`StrategyAnalysisParams(StrategyParams)` 增加行情、基准和回测引擎设置；都实现 `run` 并返回报告。各环节的 `Model/Optimize/Control/ExecutionAnalysisParams` 直接继承对应的 Algo Params，增加独立研究所需的日期、股票池、回测设置和上游选择。
+- `FactorParams` 只提供 `universe`，项目子类声明算法字段，不携带 `start/end`。`StrategyParams` 仍包含 `start`、`end`、`universe`；四类 Algo 的 Params 从统一策略参数提取自身算法字段，不携带回测配置。
+- `FactorAnalysisParams(FactorParams)` 声明 `start`、`end` 和 `columns`、`max_lag` 等分析选项，日期由分析器直接传给 `Factor.compute(start,end)`。`StrategyAnalysisParams(StrategyParams)` 增加行情、基准和回测引擎设置；都实现 `run` 并返回报告。各环节的 `Model/Optimize/Control/ExecutionAnalysisParams` 直接继承对应的 Algo Params，增加独立研究所需的日期、股票池、回测设置和上游选择。
 - 五类公共 Form 由 Scheme 提供，项目只绑定自己的 AnalysisParams。`start/end/pool` 统一定义；四类策略环节还共享行情、基准、资金和费率。Scheme 负责 `pool → Universe`、资金费率 → `config` 以及 `build()`，不执行研究。
 
 项目自定义 AnalysisParams 同时继承本项目的具体 Params 与对应 Scheme AnalysisParams；算法字段只在 Params 声明一次。公共 Form 会自动读取具体 AnalysisParams 的字段、默认值、约束和 JSON Schema 元数据，`build()` 返回该具体类型，并执行它的字段及跨字段校验。运行时根据 Factor/Algo 的参数泛型构造新的具体 Params，只传算法声明的字段，不把分析字段泄漏给算法。
@@ -77,7 +77,7 @@ Factor 的项目输出列可以在项目 AnalysisParams 中声明一次，例如
 `columns: list[str] = Field(default_factory=lambda: ["momentum"], min_length=1, title="因子列")`。
 确实需要不同 UI 默认值时，仍可在 Form 子类覆盖对应字段。
 
-- Form 保留既有 UI 默认：日期 `2020-01-01` 至 `2027-01-01`（不含结束日），股票池沪深 300；运行参数的日期仍必填。
+- Form 保留既有 UI 默认：日期 `2020-01-01` 至 `2027-01-01`，股票池沪深 300。因子分析为闭区间 `[start,end]`，包含结束日，允许单日；策略回测仍为 `[start,end)`。直接构造分析参数时日期必填，构造 `FactorParams` 时不传日期。
 - 基础分析字段未被项目覆盖时沿用 Scheme 的 UI 默认；项目显式重新声明的字段保留项目约束和默认。Factor 表单的市值加权默认不会被 Analysis 的等权默认意外覆盖。
 - 算法的 Pydantic decorator validators 在 `build()` 构造具体 AnalysisParams 时执行，不要求表单提前具备 `universe/config`；`build()` 不会调用 `run()`。项目新增的业务字段保留原始输入和 Schema，将转换、约束及模型校验统一推迟到 `build()`，避免转换两次或绕过算法的 strict/字符串规范化配置。不能把单独构造 Form 当作完整研究参数已经校验通过。
 - 项目在 AnalysisParams 中重新声明的平台字段（如 `start`、`benchmark`、`columns`）若只修改默认值、标题或约束，仍由表单校验并规范化，传给下游环节的公共值保持规范；带 Annotated 转换器、字段 validator 或嵌套模型时，与业务字段一样推迟到 `build()` 只执行一次。
@@ -115,6 +115,16 @@ Worker 使用锁文件中的 Scheme 默认实现；显式指定的下游包优�
 
 Algo 包与 Scheme 的主版本、次版本必须一致，补丁版本可独立迭代。包声明整个主次版本系列，例如 `scheme>=1.2.0,<1.3.0`，因此 Scheme 1.2.0 与 1.2.7 均可用于 1.2.x 项目，不允许与 1.1.x 或 1.3.x 混用。下界必须为该系列的补丁 0，上界必须为下一次版本的补丁 0；不接受补丁版本下界、精确版本、直接 Git/URL、条件依赖或跨次版本范围。模板选择、上游项目安装、策略组装和正式 wheel 校验使用同一兼容边界。项目和正式任务仍使用 uv source 与锁文件精确固定实际版本，兼容不等于自动升级或放宽锁文件、wheel 身份校验。其他共享依赖仍须可共同解析。
 
+### 因子区间一致性校验
+
+因子 `compute(start,end)` 和 `validate(start,end,n_sample=5)` 都使用闭区间 `[start,end]`，`compute(d,d)` 必须返回当天数据。`FactorParams` 不保存日期；若算法需要历史预热，在实现内以本次传入的 `start` 确定回看范围，不使用创建对象时的固定日期。
+
+`factor.validate(start,end,n_sample)` 先计算完整因子表，再从实际输出中的唯一日期无放回随机抽样；日期不足 `n_sample` 时全部检查。每个样本原样调用 `compute(d,d)`，比较当天全部证券和全部输出列，不只比较分析选择的列。索引、列集合和缺失值位置须相同，数值按 `rtol=1e-7, atol=1e-10` 比较，忽略行列排列差异。全部通过返回 `None`，否则抛出含样本日期的错误。空表、重复索引等不能作为通过结果。日志记录样本日期；抽样通过不是对所有日期的一致性证明。
+
+Jupyter 保存版本时，对已冻结的源码调用一次 `scheme parameters --validate --validate-factor`，默认最多抽 5 个日期；校验失败标记该版本构建失败，不提交调度。读取表单、普通 `parameters --validate` 和保存前的参数预检不计算因子；正式任务及提交重试不重复校验。独立一致性计算不受普通构建命令的 600 秒超时限制，仍受数据服务自身查询约束。
+
+这次参数与闭区间变更需要配套更新 Scheme、Factor 实现和 Jupyter。旧项目不能只升级安装包后继续沿用半开区间 `compute`；已有版本、冻结任务和报告保持原样，不自动迁移或重算。
+
 ### 日志（1.3.2 起）
 
 沿用 Arena 原有日志格式，不增加自定义列：时间、方括号级别、文件、函数、源码行号和消息。标准库日志接入后保留真实调用位置，不显示桥接 Handler 的位置。Notebook 中写入单元格输出，正式任务写入 stderr，进入调度日志；stdout 仍留给 CLI 的 JSON 输出。
@@ -142,6 +152,15 @@ logger.info("训练完成：%d 个样本", count)
 ```
 
 独立研究进程没有配置标准库日志时，研究包（`factor`、`model_1a2b` 等平台包名及其子模块）、Notebook（`__main__`）、`backtest` 和 `scheme` 的标准库日志按所选级别输出；其他第三方库只输出 WARNING 及以上。宿主已配置标准库日志时，保留已有处理器和 root 级别，日志继续由宿主处理，不替换或关闭其日志文件。Scheme 自身日志的格式和级别设置仍然生效。
+
+### 1.7.0 因子闭区间与保存前抽样校验
+
+- `FactorParams` 移除 `start/end`；日期只由 `FactorAnalysisParams` 保存并传给 `compute(start,end)`。删除依赖参数日期的 `Factor.universe` 缓存属性，使用 `self.params.universe` 显式查询。
+- 因子计算、分析及 `validate` 统一使用闭区间 `[start,end]`，包含结束日，`compute(d,d)` 表示当天。收益行情不读取 end 之后的数据，执行统计包含末日；策略回测和通用 Universe 查询仍保持半开区间。
+- 新增 `factor.validate(start,end,n_sample=5)`：先计算全表，再随机抽取最多 n_sample 个唯一日期逐日对照，核对全部证券、列、NULL 位置及容差内数值。抽样通过不等于穷尽证明。
+- 配套 Jupyter 保存因子版本时，仅对冻结源码自动校验一次，通过后才构建并提交；差异会阻断保存。表单读取、普通参数校验、非因子保存和提交重试不增加计算。
+
+这是不兼容的接口调整，发布新的次版本。Algo 1.7.0 的五个模板使用 `scheme>=1.7.0,<1.8.0`；Factor 模板已适配闭区间。已有项目不会自动升级或改写源码，升级前须迁移自定义 Factor 的日期处理。新版 Jupyter 的因子保存需要 Scheme 1.7.0；旧 Scheme 不支持保存校验开关时明确失败，不静默跳过。历史运行、冻结环境及报告保持原样。
 
 ### 1.6.3 因子报告缺失收益的汇总修复
 
@@ -318,7 +337,7 @@ with backtest(request, callbacks, config={"cash": 100000}) as result:
 ```
 
 这两个 Arena 入口沿用闭区间 `[start_date, end_date]`，结果使用 `time/code` 列与 `.SH/.SZ` 证券代码，
-并使用已部署的 Arena DolphinDB `query/common/backtest` 模块。Solo 自身的 Factor/Algo 研究入口仍采用下文的 `[start, end)`。
+并使用已部署的 Arena DolphinDB `query/common/backtest` 模块。Solo 因子计算和分析采用 `[start, end]`；策略回测及共享 `Universe.query/evaluate` 仍采用 `[start, end)`。因子实现调用共享 Universe 时，应传 `end + timedelta(days=1)` 以包含结束日。
 Arena 的 `backtest` 会通过 Tushare 读取股票元数据，因此还需配置 `TUSHARE_TOKEN`。
 
 ```python
@@ -364,7 +383,7 @@ report.show()
 把同一套前端组件编译到 `scheme/report/assets`，然后构建 Scheme wheel。
 安装 Scheme 不需要 Node.js 或前端源码；`show()` 展示依赖上述 Solo Jupyter 服务与桥接。
 
-所有日期采用 [start, end)，回测入口转换为插件的包含结束日配置。日线合成每日开盘、收盘两份快照，
+策略回测日期采用 `[start, end)`，回测入口转换为插件的包含结束日配置；因子日期单独采用 `[start,end]`。日线合成每日开盘、收盘两份快照，
 要求真实涨跌停价，不使用当日高低价推算开盘可见范围；合成盘口近似无限流动性，不用于衡量真实冲击成本。
 当日没有日线的停牌、未上市或已退市证券不生成快照。
 snapshot 模式接收 Arena StockSnapshot 的 Market、SecurityID、TradeDate、TradeTime、Bid/Ask 五档字段，
@@ -383,7 +402,7 @@ snapshot 模式接收 Arena StockSnapshot 的 Market、SecurityID、TradeDate、
 
 O、C 分别为 `open * adj_factor`、`close * adj_factor`；收益通过 Arena query DSL 在 DolphinDB 中按完整查询交易日轴计算，不能在已筛选或稀疏的因子面板上位移，也不能跳过缺行情寻找下一条非空价格。`o` 表示隔夜段。
 Factor 面板上传后，在同一 DolphinDB 会话内拼接收益率、过滤因子空值、生成分组并调用 Arena factor 模块计算报告；不重复处理 Factor 的预处理。默认等权，market_value 使用 circ_mv；只生成分组标签，不修改因子值。
-行情仍只读取 `[start,end)`，最大滞后不会扩展查询结束日；不足未来 k 个交易日时，`r{k-1}o` 与 `r{k}` 为 NULL，不填零。收盘缺失可能只影响日内段，不能因为某个标签为空就删除其它可评价标签；这些行仍保留因子、分组及换手。
+因子评价行情只读取 `[start,end]`，包含结束日但不读取之后的价格，最大滞后不会扩展查询结束日；不足未来 k 个交易日时，`r{k-1}o` 与 `r{k}` 为 NULL，不填零。收盘缺失可能只影响日内段，不能因为某个标签为空就删除其它可评价标签；这些行仍保留因子、分组及换手。
 报告为每段收益记录 `kind=simple, periods=1`，另标明 lag 和 overnight/intraday；不能将字段中的阶数当成持有期。换手独立比较因子分组在 1..N 个交易日间隔下的变化，不等同实际成交换手。
 旧 `return_periods` 不会被自动解释成新滞后参数，旧保存报告由原有收益规格解释，不改写历史文件。评价交易日轴由 calendar_symbol（默认沪深300）行情确定，缺少基准数据报错。
 未来收益只进入评价，不能传给 Model。默认风险平价缺少历史样本或求解失败时退化等权并记录原因。
@@ -407,9 +426,9 @@ StrategyParams 允许额外字段，例如 `window=20`、`gross_exposure=0.8`；
 保留默认值、类型转换和校验，同名参数共享同一个值。缺失必填参数或校验失败会在组装时报错。
 JSON 中所有 Algo 参数统一写在 `backtest`，`algos` 只描述包与入口，不再接受各自的 `params`。
 
-`scheme.FactorParams` 和 `scheme.StrategyParams` 各自定义所属运行领域的 `start`、`end`、`universe`；
+`scheme.FactorParams` 只定义 `universe`，因子日期由 `FactorAnalysisParams` 自己声明，区间为 `[start,end]`。
+`scheme.StrategyParams` 仍定义 `start`、`end`、`universe`，策略日期为 `[start,end)`。
 `FactorAnalysisParams`、`StrategyAnalysisParams` 分别直接继承它们，不通过额外的日期或 Settings 混入类间接拼接。
-日期取外层 `[start, end)`。
 
 ### 股票池（1.4.0 起）
 
@@ -457,10 +476,10 @@ panel = params.universe.evaluate(params.start, params.end)
 面板索引名为 `date`，为查询区间的交易日；列为第一阶段的候选并集（全市场为查询轴代码，`.XSHG/.XSHE`），
 值为当日的成员节点 `Universe.member`。退池后为 `False`，某天没有成员时保留全 `False` 行；指数池在整个区间没有成员时，
 第一阶段按 Arena 规则报错。
-Factor 和 Strategy 的 `universe` 属性首次访问时查询并缓存这张面板。
+Strategy 的 `universe` 属性首次访问时查询并缓存这张面板。Factor 不再持有依赖参数日期的缓存属性；在 `compute(start,end)` 内使用 `self.params.universe` 按传入日期查询。
 Algo 可通过 `self.backtest.universe` 读取；回测未指定 `symbols` 时按面板列名加载行情，
 每日是否选股由 Algo 根据对应日期的布尔值判断。显式 `symbols` 仅控制行情加载范围。
-CLI 因子任务以 `analysis` 的这三个公共参数为准，保留 `factor.params` 的自定义算法字段，再按具体 Factor 的泛型参数模型校验。表单序列化时把具体算法字段存入 `factor`，标准分析选项存入 `analysis`；不能被标准分析器执行的自定义分析字段会明确报错，不静默丢弃。
+CLI 因子任务从 `analysis` 取得日期传给 `compute`，只把共享 `universe` 和 `factor.params` 的自定义算法字段交给具体 Factor 参数模型。表单序列化时 `factor.params` 不含日期，`analysis` 包含日期和标准分析选项；不能被标准分析器执行的自定义分析字段会明确报错，不静默丢弃。
 
 默认 Optimize 只接受有符号数值 Signal；自定义结构必须配套 Optimize。
 Solo 研究链路统一使用 `.XSHG/.XSHE`：股票池、Signal、Target、行情、持仓与回报使用相同代码。

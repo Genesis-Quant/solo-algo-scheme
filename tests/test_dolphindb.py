@@ -309,7 +309,7 @@ def test_real_factor_statistics(monkeypatch, tmp_path, weight):
     )
     monkeypatch.setattr("scheme.execute.factor.api.query", query_prices(prices))
     result = analyze_factors(
-        TestFactor(FactorParams(start="2025-01-02", end="2025-01-07")),
+        TestFactor(FactorParams()),
         FactorAnalysisParams(
             start="2025-01-02",
             end="2025-01-07",
@@ -364,7 +364,7 @@ def test_real_market_weight_checks_only_valid_factor_rows(monkeypatch, missing_c
         calendar_symbol="000001.XSHE",
         weight="market_value",
     )
-    factor = SparseFactor(FactorParams(start="2025-01-02", end="2025-01-04"))
+    factor = SparseFactor(FactorParams())
     if missing_cap == "600000.SH":
         with pytest.raises(RuntimeError, match="有效因子记录具备正数 circ_mv"):
             analyze_factors(factor, params)
@@ -378,10 +378,10 @@ def test_real_market_weight_checks_only_valid_factor_rows(monkeypatch, missing_c
 
 def test_real_factor_query_pipeline():
     result = analyze_factors(
-        TestFactor(FactorParams(start="2026-06-01", end="2026-06-03")),
+        TestFactor(FactorParams()),
         FactorAnalysisParams(
             start="2026-06-01",
-            end="2026-06-03",
+            end="2026-06-02",
             columns=["score"],
             max_lag=2,
             groups=2,
@@ -418,12 +418,10 @@ def test_real_segment_returns_keep_missing_prices_sparse_factor_dates_and_end_bo
 
     monkeypatch.setattr("scheme.execute.factor.api.query", query_prices(prices))
     params = FactorAnalysisParams(
-        start="2025-01-03", end="2025-01-09", columns=["score"], max_lag=2,
+        start="2025-01-03", end="2025-01-08", columns=["score"], max_lag=2,
         groups=2, n_select=1, calendar_symbol="600000.XSHG",
     )
-    result = analyze_factors(SparseDates(FactorParams(**{
-        name: getattr(params, name) for name in ("start", "end", "universe")
-    })), params)
+    result = analyze_factors(SparseDates(FactorParams(universe=params.universe)), params)
     frame = result.processed_data.set_index(["code", "time"])
     assert len(frame) == 6
     first = frame.loc[("000001.XSHE", days[0])]

@@ -139,7 +139,7 @@ def test_missing_quotes_preserve_positions_and_independent_session_labels():
 def test_generated_graph_is_runtime_json_and_reads_only_open_close_and_adjustments():
     derivatives = _return_derivatives(3)
     query = FactorQuery.model_validate({
-        "start_date": DATES["start"], "end_date": "2025-01-08", "codes": ["000001.SZ"],
+        "start_date": DATES["start"], "end_date": DATES["end"], "codes": ["000001.SZ"],
         "factors": [], "derivatives": derivatives,
     })
     assert set(query.source_factors()) == {"open", "close", "adj_factor"}
