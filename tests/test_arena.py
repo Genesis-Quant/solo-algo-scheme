@@ -10,11 +10,13 @@ from runtime.apps.backtest.schema import CALLBACK_PARAMETER_COUNTS
 from runtime.apps.query import execute_query
 
 from scheme.data import backtest, query
+from scheme.data.dolphindb.api import query as fixed_codes_query
 from scheme.data.dolphindb.backtest import backtest as inline_backtest
 
 
-def test_query_is_arena_function_and_backtest_uses_inline_wrapper():
-    assert query is execute_query
+def test_query_uses_fixed_codes_wrapper_and_backtest_uses_inline_wrapper():
+    assert query is fixed_codes_query
+    assert query is not execute_query
     assert backtest is inline_backtest
     assert backtest is not run_backtest
 

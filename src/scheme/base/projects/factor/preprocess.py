@@ -12,7 +12,6 @@ from backtest import DosVar
 from scheme.config import DolphinSettings
 from scheme.data.dolphindb.api import query
 from scheme.data.dolphindb.database.session import create_session
-from scheme.data.dolphindb.scripts import factor_script
 from scheme.data.dolphindb.symbols import engine_symbol, source_symbol
 
 _KEYS = ["time", "code"]
@@ -48,12 +47,9 @@ def _columns(available, columns, market_value_column, industry_column) -> list[s
     if len(set(available)) != len(available):
         raise ValueError("input column names must be unique")
     excluded = _RESERVED | {market_value_column, industry_column}
-    if columns is None:
-        selected = [column for column in available if column not in excluded]
-    else:
-        if isinstance(columns, (str, bytes)) or not isinstance(columns, Sequence):
-            raise ValueError("columns must be a sequence of factor names")
-        selected = list(columns)
+    if isinstance(columns, (str, bytes)) or not isinstance(columns, Sequence):
+        raise ValueError("columns must be a sequence of factor names")
+    selected = list(columns)
     if not selected:
         raise ValueError("columns must not be empty")
     for column in selected:
@@ -67,54 +63,11 @@ def _columns(available, columns, market_value_column, industry_column) -> list[s
     return selected
 
 
-def _exposures(keys: pd.DataFrame, missing: list[str], settings) -> pd.DataFrame:
-    normalized = keys.assign(code=keys["code"].map(source_symbol))
-    request = {
-        "start_date": keys["time"].min().date().isoformat(),
-        "end_date": keys["time"].max().date().isoformat(),
-        "codes": sorted(normalized["code"].unique().tolist()),
-        "factors": missing,
-    }
-    # A new session has no coreQuerySourceData cache. Never give QueryResult the
-    # borrowed preprocessing session: its close() closes that session as well.
-    with create_session(settings or DolphinSettings.from_env()) as session:
-        result = query(request, session=session)
-        exposure = result.data.copy()
-    if not isinstance(exposure, pd.DataFrame) or not set(_KEYS + missing) <= set(exposure.columns):
-        raise ValueError("exposure query did not return the requested columns")
-    if not exposure.empty:
-        _keys(exposure)
-    exposure["time"] = pd.to_datetime(exposure["time"]).astype("datetime64[ns]")
-    exposure["code"] = exposure["code"].map(source_symbol)
-    merged = normalized.merge(exposure[_KEYS + missing], how="left", on=_KEYS,
-                              sort=False, validate="one_to_one")
-    merged["code"] = keys["code"].to_numpy()
-    return merged
-
-
-def _canonical(result: pd.DataFrame, columns: list[str], expected: pd.DataFrame) -> pd.DataFrame:
-    keys = _keys(result)
-    if not set(columns) <= set(result.columns):
-        raise ValueError("DolphinDB preprocess result is missing factor columns")
-    panel = result[columns].copy().reset_index(drop=True)
-    for column in columns:
-        panel[column] = pd.to_numeric(panel[column], errors="raise").astype(float)
-    panel.index = pd.MultiIndex.from_arrays(
-        [keys["time"], keys["code"].map(engine_symbol)], names=["date", "symbol"],
-    )
-    expected_index = pd.MultiIndex.from_arrays(
-        [expected["time"], expected["code"].map(engine_symbol)], names=panel.index.names,
-    )
-    if len(panel) != len(expected) or not panel.index.sort_values().equals(expected_index.sort_values()):
-        raise ValueError("DolphinDB preprocess changed the input time/code keys")
-    return panel.sort_index()
-
-
 def preprocess(
     data: pd.DataFrame | DosVar,
     *,
+    columns: Sequence[str],
     session=None,
-    columns: Sequence[str] | None = None,
     market_value_column: str = "circ_mv",
     industry_column: str = "industry_l0",
     settings: DolphinSettings | None = None,
@@ -123,7 +76,8 @@ def preprocess(
 
     Empty inputs and inputs whose selected factors are all NULL are errors.
     Invalid exposures and degenerate cross sections retain their keys with NULL
-    outputs. Existing exposure columns are used unchanged (including their NULLs).
+    outputs. Only declared factors are read from data; exposures are always queried
+    independently in a separate owned session and left-joined on time/code.
     """
     for value, label in ((market_value_column, "market_value_column"),
                          (industry_column, "industry_column")):
@@ -142,12 +96,13 @@ def preprocess(
 
     frame = None
     if not is_variable:
-        frame = data.copy(deep=True)
+        frame = data
         if isinstance(frame.index, pd.MultiIndex) and list(frame.index.names) == ["date", "symbol"]:
             if set(frame.columns) & {"time", "code", "date", "symbol"}:
                 raise ValueError("canonical index collides with input columns")
             frame = frame.reset_index().rename(columns={"date": "time", "symbol": "code"})
         selected = _columns(frame.columns, columns, market_value_column, industry_column)
+        frame = frame[_KEYS + selected].copy(deep=True)
         expected = _keys(frame)
         frame["time"] = expected["time"].to_numpy(dtype="datetime64[ms]")
         frame["code"] = expected["code"].map(source_symbol).to_numpy()
@@ -158,13 +113,20 @@ def preprocess(
             frame[column] = pd.to_numeric(frame[column], errors="raise").astype(float)
         if frame[selected].isna().all().all():
             raise ValueError("preprocess factors are all NULL")
-        available = list(frame.columns)
 
     context = (nullcontext(session) if session is not None
                else create_session(settings or DolphinSettings.from_env()))
     with context as current:
         prefix = "soloFp" + uuid4().hex
-        names = {suffix: prefix + suffix for suffix in ("Input", "Factors", "Exposure", "Mv", "Industry", "Result")}
+        names = {suffix: prefix + suffix for suffix in (
+            "Input", "Factors", "Exposure", "Mv", "Industry", "Working", "Output",
+            "HasValues", "Selected", "Raw", "Day", "DayRows", "CrossSection",
+            "RawMarketValue", "RawIndustry", "ValidMask", "MarketValue", "MvValues",
+            "MvStd", "Y", "Median", "Mad", "Lower", "Upper", "YStd", "RegressionMask",
+            "IndustryValues", "Industries", "X", "Index", "Design", "SingularValues",
+            "RankTolerance", "EffectiveRank", "Beta", "Fitted", "RawResidual",
+            "ResidualTolerance", "ResidualStd", "Residual", "ProcessedValues", "RowIds",
+        )}
         failed = False
         try:
             if is_variable:
@@ -176,40 +138,140 @@ def preprocess(
                     raise ValueError("factor columns must be real numeric values")
                 # Download keys only, never the caller's factors or query cache.
                 expected = _keys(current.run(f"select time, code from {data}"))
-            missing = [name for name in (market_value_column, industry_column) if name not in available]
-            exposure = _exposures(expected, missing, settings) if missing else None
-            current.run(factor_script("preprocess"))
+            exposure_columns = [market_value_column, industry_column]
+            normalized = expected.assign(code=expected["code"].map(source_symbol))
+            request = {
+                "start_date": expected["time"].min().date().isoformat(),
+                "end_date": expected["time"].max().date().isoformat(),
+                "codes": sorted(normalized["code"].unique().tolist()),
+                "factors": exposure_columns,
+            }
+            # QueryResult.close() also closes its session; never borrow current here.
+            with create_session(settings or DolphinSettings.from_env()) as query_session:
+                query_result = query(request, session=query_session)
+                exposure = query_result.data.copy()
+            if (not isinstance(exposure, pd.DataFrame)
+                    or not set(_KEYS + exposure_columns) <= set(exposure.columns)):
+                raise ValueError("exposure query did not return the requested columns")
+            if not exposure.empty:
+                _keys(exposure)
+            exposure["time"] = pd.to_datetime(exposure["time"]).astype("datetime64[ns]")
+            exposure["code"] = exposure["code"].map(source_symbol)
+            exposure = normalized.merge(
+                exposure[_KEYS + exposure_columns], how="left", on=_KEYS,
+                sort=False, validate="one_to_one",
+            )
+            exposure["code"] = expected["code"].to_numpy()
             payload = {
                 names["Factors"]: np.asarray(selected, dtype=str),
                 names["Mv"]: market_value_column,
                 names["Industry"]: industry_column,
             }
             if frame is not None:
-                # Extra columns cannot affect factor processing or upload types.
-                payload[names["Input"]] = frame[_KEYS + selected + [
-                    name for name in (market_value_column, industry_column) if name in available
-                ]].copy()
-            if exposure is not None:
-                exposure["time"] = exposure["time"].to_numpy(dtype="datetime64[ms]")
-                payload[names["Exposure"]] = exposure
+                payload[names["Input"]] = frame
+            exposure["time"] = exposure["time"].to_numpy(dtype="datetime64[ms]")
+            payload[names["Exposure"]] = exposure
             current.upload(payload)
-            source = names["Input"]
-            if is_variable:
-                current.run(f"{source} = {data}.copy(); {source}[`time] = timestamp({source}[`time]); "
-                            f"{source}[`code] = string({source}[`code])")
-            if exposure is not None:
-                current.run(f"{source} = lj({source}, {names['Exposure']}, `time`code)")
-            current.run(
-                f"{names['Result']} = soloFactorPreprocess({source}, {names['Factors']}, "
-                f'"time", "code", {names["Mv"]}, {names["Industry"]})'
+            source = data if is_variable else names["Input"]
+            result = current.run(f'''
+{prefix}Working = sql(sqlCol(symbol(["time", "code"] join {prefix}Factors)), {source}).eval()
+replaceColumn!({prefix}Working, `time, timestamp({prefix}Working[`time]))
+replaceColumn!({prefix}Working, `code, string({prefix}Working[`code]))
+{prefix}Working = lj({prefix}Working, {prefix}Exposure, `time`code)
+{prefix}Working.sortBy!(`time`code)
+{prefix}Output = select time, code from {prefix}Working
+{prefix}HasValues = false
+for ({prefix}Selected in {prefix}Factors) {{
+    {prefix}Raw = double({prefix}Working[{prefix}Selected])
+    if (any(isValid({prefix}Raw))) {prefix}HasValues = true
+    {prefix}Output[{prefix}Selected] = take(double(NULL), {prefix}Working.rows())
+}}
+if (!{prefix}HasValues) throw "preprocess factors are all NULL"
+for ({prefix}Day in sort(distinct({prefix}Working[`time]))) {{
+    {prefix}DayRows = at({prefix}Working[`time] == {prefix}Day)
+    {prefix}CrossSection = {prefix}Working[{prefix}Working[`time] == {prefix}Day]
+    for ({prefix}Selected in {prefix}Factors) {{
+        {prefix}Raw = double({prefix}CrossSection[{prefix}Selected])
+        {prefix}RawMarketValue = double({prefix}CrossSection[{prefix}Mv])
+        {prefix}RawIndustry = string({prefix}CrossSection[{prefix}Industry])
+        {prefix}ValidMask = isValid({prefix}Raw) && isValid({prefix}RawMarketValue) && isValid({prefix}RawIndustry)
+        if (sum({prefix}ValidMask) == 0) continue
+        {prefix}MarketValue = {prefix}RawMarketValue[{prefix}ValidMask]
+        {prefix}MarketValue = iif({prefix}MarketValue < 1, 1.0, {prefix}MarketValue)
+        {prefix}MvValues = log({prefix}MarketValue)
+        {prefix}MvStd = stdp({prefix}MvValues)
+        if (isNull({prefix}MvStd) || {prefix}MvStd <= 0) continue
+        {prefix}MvValues = ({prefix}MvValues - avg({prefix}MvValues)) \\ {prefix}MvStd
+        {prefix}Y = {prefix}Raw[{prefix}ValidMask]
+        {prefix}Median = median({prefix}Y)
+        {prefix}Mad = median(abs({prefix}Y - {prefix}Median))
+        if (isValid({prefix}Mad) && {prefix}Mad > 0) {{
+            {prefix}Lower = {prefix}Median - 3.0 * {prefix}Mad
+            {prefix}Upper = {prefix}Median + 3.0 * {prefix}Mad
+            {prefix}Y = iif({prefix}Y < {prefix}Lower, {prefix}Lower, iif({prefix}Y > {prefix}Upper, {prefix}Upper, {prefix}Y))
+        }}
+        {prefix}YStd = stdp({prefix}Y)
+        if (isNull({prefix}YStd) || {prefix}YStd <= 0) continue
+        {prefix}Y = ({prefix}Y - avg({prefix}Y)) \\ {prefix}YStd
+        {prefix}RegressionMask = isValid({prefix}Y) && isValid({prefix}MvValues)
+        {prefix}Y = {prefix}Y[{prefix}RegressionMask]
+        {prefix}MvValues = {prefix}MvValues[{prefix}RegressionMask]
+        if (size({prefix}Y) == 0) continue
+        {prefix}IndustryValues = {prefix}RawIndustry[{prefix}ValidMask][{prefix}RegressionMask]
+        {prefix}RowIds = {prefix}DayRows[{prefix}ValidMask][{prefix}RegressionMask]
+        {prefix}Industries = sort(distinct({prefix}IndustryValues))
+        {prefix}X = matrix({prefix}MvValues)
+        if (size({prefix}Industries) > 1) {{
+            for ({prefix}Index in 1 .. (size({prefix}Industries) - 1)) {{
+                {prefix}X = {prefix}X join matrix(double({prefix}IndustryValues == {prefix}Industries[{prefix}Index]))
+            }}
+        }}
+        {prefix}Design = matrix(take(1.0, size({prefix}Y))) join {prefix}X
+        {prefix}SingularValues = svd({prefix}Design, false, false)
+        {prefix}RankTolerance = max([rows({prefix}Design), cols({prefix}Design)]) * max({prefix}SingularValues) * 2.220446049250313e-16
+        {prefix}EffectiveRank = sum({prefix}SingularValues > {prefix}RankTolerance)
+        if (size({prefix}Y) <= {prefix}EffectiveRank) continue
+        {prefix}Beta = ols({prefix}Y, {prefix}X, true, 0, "svd")
+        {prefix}Fitted = {prefix}Beta[0] + {prefix}Beta[1] * {prefix}MvValues
+        if (size({prefix}Industries) > 1) {{
+            for ({prefix}Index in 1 .. (size({prefix}Industries) - 1)) {{
+                {prefix}Fitted = {prefix}Fitted + {prefix}Beta[{prefix}Index + 1] * flatten({prefix}X[, {prefix}Index])
+            }}
+        }}
+        {prefix}RawResidual = {prefix}Y - {prefix}Fitted
+        {prefix}ResidualTolerance = max(abs({prefix}Y)) * max([rows({prefix}Design), cols({prefix}Design)]) * 2.220446049250313e-16
+        {prefix}ResidualStd = stdp({prefix}RawResidual)
+        if (isNull({prefix}ResidualStd) || {prefix}ResidualStd <= {prefix}ResidualTolerance) continue
+        {prefix}Residual = ({prefix}RawResidual - avg({prefix}RawResidual)) \\ {prefix}ResidualStd
+        {prefix}ProcessedValues = {prefix}Output[{prefix}Selected]
+        {prefix}ProcessedValues[{prefix}RowIds] = {prefix}Residual
+        {prefix}Output[{prefix}Selected] = {prefix}ProcessedValues
+    }}
+}}
+{prefix}Output
+''')
+            keys = _keys(result)
+            if not set(selected) <= set(result.columns):
+                raise ValueError("DolphinDB preprocess result is missing factor columns")
+            panel = result[selected].copy().reset_index(drop=True)
+            for column in selected:
+                panel[column] = pd.to_numeric(panel[column], errors="raise").astype(float)
+            panel.index = pd.MultiIndex.from_arrays(
+                [keys["time"], keys["code"].map(engine_symbol)], names=["date", "symbol"],
             )
-            return _canonical(current.run(names["Result"]), selected, expected)
+            expected_index = pd.MultiIndex.from_arrays(
+                [expected["time"], expected["code"].map(engine_symbol)], names=panel.index.names,
+            )
+            if (len(panel) != len(expected)
+                    or not panel.index.sort_values().equals(expected_index.sort_values())):
+                raise ValueError("DolphinDB preprocess changed the input time/code keys")
+            return panel.sort_index()
         except BaseException:
             failed = True
             raise
         finally:
             cleanup = "; ".join(
-                f'if (isDef("{name}")) undef("{name}", VAR)' for name in names.values()
+                f'if ("{name}" in objs().name) {{ undef("{name}", VAR) }}' for name in names.values()
             )
             try:
                 current.run(cleanup)

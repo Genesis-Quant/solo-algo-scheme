@@ -48,6 +48,8 @@ DATES = {"start": "2025-01-01", "end": "2025-01-03"}
 
 
 class ExampleFactor(Factor[FactorParams]):
+    columns = ["f"]
+
     def compute(self, start: date, end: date) -> pd.DataFrame:
         return pd.DataFrame(
             {"f": [1.0, 2.0]},
@@ -173,7 +175,7 @@ def test_factor_returns_are_read_only_until_end(monkeypatch, settings, max_lag, 
     monkeypatch.setattr("scheme.execute.factor.api.query", capture)
     monkeypatch.setattr("scheme.execute.factor.api.create_session", lambda _: nullcontext(object()))
     params = FactorAnalysisParams(
-        **DATES, columns=["f"], period=period, max_lag=max_lag, price_column=price_column,
+        **DATES, period=period, max_lag=max_lag, price_column=price_column,
     )
     with pytest.raises(Stop):
         analyze_factors(ExampleFactor(FactorParams()), params, settings=settings)
@@ -189,7 +191,7 @@ def test_factor_returns_are_read_only_until_end(monkeypatch, settings, max_lag, 
 def test_factor_analysis_keeps_closed_end_in_source_query_and_statistics(monkeypatch, settings, start):
     from scheme.execute.factor import api
 
-    params = FactorAnalysisParams(start=start, end="2025-01-03", columns=["f"])
+    params = FactorAnalysisParams(start=start, end="2025-01-03")
     panel = pd.DataFrame(
         {"f": [1.0, 2.0]},
         index=pd.MultiIndex.from_product(
@@ -197,8 +199,8 @@ def test_factor_analysis_keeps_closed_end_in_source_query_and_statistics(monkeyp
             names=["date", "symbol"],
         ),
     )
-    factor = Mock(spec=ExampleFactor)
-    factor.compute.return_value = panel
+    factor = ExampleFactor(FactorParams())
+    factor.compute = Mock(return_value=panel)
     session = SimpleNamespace(run=Mock(return_value=pd.DataFrame()), upload=Mock())
     request = Mock(return_value=nullcontext(SimpleNamespace(data_ref="offlineReturns")))
     monkeypatch.setattr(api, "create_session", lambda _: nullcontext(session))
@@ -211,14 +213,18 @@ def test_factor_analysis_keeps_closed_end_in_source_query_and_statistics(monkeyp
     uploaded = session.upload.call_args.args[0]
     assert uploaded["soloStart"] == np.datetime64(params.start, "ms")
     assert uploaded["soloEnd"] == np.datetime64("2025-01-04", "ms")
+    assert uploaded["soloFactors"].tolist() == list(ExampleFactor.columns) == ["f"]
     assert uploaded["soloFactorSource"].time.max() == pd.Timestamp(params.end)
     assert len(uploaded["soloFactorSource"]) == (2 if start == "2025-01-01" else 1)
-    assert any("soloStart, soloEnd" in call.args[0] for call in session.run.call_args_list)
+    script = session.run.call_args_list[0].args[0]
+    assert "soloOutputExecutionStatistics = select count(*) as source_count" in script
+    assert script.count("where time >= soloStart, time < soloEnd, !isNull(code)") == 2
+    session.run.assert_any_call("soloOutputExecutionStatistics")
 
 
 def test_factor_report_form_build_and_run(monkeypatch, settings):
     form = FactorReportForm(
-        **DATES, columns=["f"], pool=StockPool.CSI300, groups=3,
+        **DATES, pool=StockPool.CSI300, groups=3,
         period=5, price_column="close_hfq", max_lag=3,
     )
     params = form.build()
@@ -229,7 +235,8 @@ def test_factor_report_form_build_and_run(monkeypatch, settings):
     assert (params.start, params.end) == (form.start, form.end)
     assert FactorAnalysisParams.model_validate_json(params.model_dump_json()) == params
     assert params.universe == Universe(pool=StockPool.CSI300)
-    report = empty_factor_report(params)
+    assert params.columns == []
+    report = empty_factor_report(params.model_copy(update={"columns": list(ExampleFactor.columns)}))
     analyze = Mock(return_value=report)
     monkeypatch.setattr("scheme.execute.factor.api.analyze_factors", analyze)
 
@@ -238,6 +245,7 @@ def test_factor_report_form_build_and_run(monkeypatch, settings):
     assert result is report
     factor, analysis = analyze.call_args.args
     assert analysis is params
+    assert analysis.columns == list(ExampleFactor.columns) == ["f"]
     assert analyze.call_args.kwargs == {"settings": settings}
     assert type(factor.params) is FactorParams
     assert set(factor.params.model_dump()) == {"universe"}
@@ -268,7 +276,7 @@ def test_universe_offers_only_arena_stock_pools():
         with pytest.raises(ValidationError):
             Universe.model_validate(value)
     with pytest.raises(ValidationError):
-        FactorReportForm(**DATES, columns=["f"], pool="项目股票池")
+        FactorReportForm(**DATES, pool="项目股票池")
 
 
 def test_member_is_a_class_attribute_not_a_parameter():
@@ -282,23 +290,22 @@ def test_member_is_a_class_attribute_not_a_parameter():
         universe.member = "other"
 
 
-def test_index_pool_codes_query_is_arena_first_stage():
-    codes_query = Universe(pool=StockPool.CSI300).codes_query(date(2025, 1, 1), date(2025, 1, 3))
-    assert codes_query.model_dump(mode="json") == {
+@pytest.mark.parametrize("pool", list(StockPool))
+def test_universe_runs_one_query_with_empty_codes_for_process_domain(monkeypatch, pool):
+    universe = Universe(pool=pool)
+    result = object()
+    execute = Mock(return_value=result)
+    monkeypatch.setattr("scheme.data.dolphindb.universe.query", execute)
+
+    assert universe.query(date(2025, 1, 1), date(2025, 1, 3), factors=["close"]) is result
+    execute.assert_called_once()
+    request = execute.call_args.args[0]
+    assert request.model_dump(mode="json") == {
         "start_date": "2025-01-01", "end_date": "2025-01-02", "lookback": "PT0S",
-        "codes": [], "factors": [], "derivatives": {"stock_pool_member": INDEX_MEMBER},
-        "filters": ["stock_pool_member"],
+        "codes": [], "factors": ["close"],
+        "derivatives": {Universe.member: MEMBERS[pool]}, "filters": [],
     }
-    weights = {
-        StockPool.SSE50: "weight_000016SH", StockPool.CSI300: "weight_000300SH",
-        StockPool.CSI500: "weight_000905SH", StockPool.CSI1000: "weight_000852SH",
-    }
-    for pool, weight in weights.items():
-        query = Universe(pool=pool).codes_query(date(2025, 1, 1), date(2025, 1, 3))
-        assert query.model_dump(mode="json")["derivatives"]["stock_pool_member"] == {
-            **INDEX_MEMBER, "fields": {"left": weight, "right": 0},
-        }
-    assert Universe().codes_query(date(2025, 1, 1), date(2025, 1, 3)) is None
+    assert not hasattr(universe, "codes_query")
 
 
 @pytest.mark.parametrize("pool", list(StockPool))
@@ -1012,6 +1019,8 @@ def frozen_factor_task(tmp_path, monkeypatch):
         window: int = Field(gt=0)
 
     class FrozenFactor(Factor[Parameters]):
+        columns = ["f"]
+
         def compute(self, start: date, end: date) -> pd.DataFrame:
             raise AssertionError("frozen task test must not compute or query")
 
@@ -1079,6 +1088,8 @@ def test_frozen_factor_task_accepts_canonical_and_alias_runtime_fields(
         window: int = Field(alias="days", gt=0)
 
     class AliasedFactor(Factor[Parameters]):
+        columns = ["f"]
+
         def compute(self, start: date, end: date) -> pd.DataFrame:
             raise AssertionError("frozen task test must not compute or query")
 
@@ -1099,6 +1110,8 @@ def test_frozen_factor_analysis_overrides_only_shared_universe_aliases(frozen_fa
         universe: Universe = Field(validation_alias=alias)
 
     class AliasedFactor(Factor[Parameters]):
+        columns = ["f"]
+
         def compute(self, start: date, end: date) -> pd.DataFrame:
             raise AssertionError("frozen task test must not compute or query")
 

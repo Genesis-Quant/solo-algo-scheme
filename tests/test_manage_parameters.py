@@ -43,6 +43,8 @@ class RuntimeParams(FactorParams):
 
 
 class CustomFactor(Factor[RuntimeParams]):
+    columns = ["f"]
+
     def compute(self, start, end):
         raise AssertionError("parameter inspection must not compute")
 
@@ -58,7 +60,7 @@ class CustomForm(ReportForm[CustomAnalysis]):
     window: int
 
     def build(self) -> CustomAnalysis:
-        return CustomAnalysis(**self.model_dump(), columns=["f"])
+        return CustomAnalysis(**self.model_dump())
 
 
 @pytest.mark.parametrize("end", ["2026-06-01", "2026-06-03"])
@@ -72,6 +74,8 @@ def test_direct_generic_form_preserves_custom_factor_runtime_fields(project, mon
     assert set(definition["schemas"]) == {"form"}
     assert set(definition["schemas"]["form"]["required"]) == {"start", "end", "window"}
     assert definition["values"] == {"form": {}}
+    assert "columns" not in definition["schemas"]["form"]["properties"]
+    assert CustomForm(start="2026-06-01", end=end, window=17).build().columns == []
     payload = inspect_project(directory, {"form": {
         "start": "2026-06-01", "end": end, "window": 17,
     }})
@@ -113,6 +117,7 @@ def test_save_factor_validation_instantiates_concrete_runtime_once(project, end)
     assert payload["factor"] == calls[0][1].model_dump(mode="json")
     assert payload["analysis"]["start"] == "2026-06-01"
     assert payload["analysis"]["end"] == end
+    assert payload["analysis"]["columns"] == list(ValidatingFactor.columns) == ["f"]
 
 
 @pytest.mark.parametrize("form", [
@@ -144,6 +149,8 @@ def test_save_factor_validation_rejects_runtime_projection_before_instantiation(
             return value
 
     class EvenFactor(Factor[EvenRuntimeParams]):
+        columns = ["f"]
+
         def compute(self, start, end):
             raise AssertionError("invalid runtime params must not compute")
 
@@ -175,7 +182,7 @@ def test_sole_generic_form_alias_defaults_round_trip_to_runtime(project, alias):
 
         def build(self) -> CustomAnalysis:
             return CustomAnalysis(
-                start=self.start, end=self.end, window=self.window, columns=["f"],
+                start=self.start, end=self.end, window=self.window,
             )
 
     module.Factor, module.FactorReportForm = CustomFactor, AliasedForm
@@ -217,7 +224,7 @@ def test_required_form_alias_is_published_and_validated(project):
 
         def build(self) -> CustomAnalysis:
             return CustomAnalysis(
-                start="2026-06-01", end="2026-06-03", window=self.window, columns=["f"],
+                start="2026-06-01", end="2026-06-03", window=self.window,
             )
 
     module.Factor, module.FactorReportForm = CustomFactor, AliasedForm
@@ -258,7 +265,7 @@ def test_form_with_alias_validation_disabled_keeps_canonical_wire_key(project):
 
         def build(self) -> CustomAnalysis:
             return CustomAnalysis(
-                start="2026-06-01", end="2026-06-03", window=self.window, columns=["f"],
+                start="2026-06-01", end="2026-06-03", window=self.window,
             )
 
     module.Factor, module.FactorReportForm = CustomFactor, CanonicalForm
@@ -290,7 +297,7 @@ def test_manage_cli_keeps_single_generic_form_protocol(project, monkeypatch, cap
 
         def build(self) -> CustomAnalysis:
             return CustomAnalysis(
-                start="2026-06-01", end="2026-06-03", window=self.window, columns=["f"],
+                start="2026-06-01", end="2026-06-03", window=self.window,
             )
 
     module.Factor, module.FactorReportForm = CustomFactor, CliForm
@@ -304,6 +311,7 @@ def test_manage_cli_keeps_single_generic_form_protocol(project, monkeypatch, cap
     payload = json.loads(capsys.readouterr().out)
     assert payload["entry"] == f"{module.__name__}:Factor"
     assert payload["factor"]["window"] == 17
+    assert payload["analysis"]["columns"] == list(CustomFactor.columns) == ["f"]
 
 
 def test_manage_cli_save_factor_validation_uses_analysis_dates_once(project, monkeypatch, capsys):
@@ -441,7 +449,7 @@ def test_build_must_return_the_declared_matching_analysis(project, wrong_type):
 
     class WrongForm(ReportForm[CustomAnalysis]):
         def build(self) -> CustomAnalysis:
-            return wrong_type(start="2026-06-01", end="2026-06-03", columns=["f"])
+            return wrong_type(start="2026-06-01", end="2026-06-03")
 
     module.Factor, module.FactorReportForm = CustomFactor, WrongForm
     with pytest.raises(ValueError, match=r"build\(\).*CustomAnalysis"):
@@ -485,7 +493,7 @@ def test_unrepresentable_factor_analysis_fields_fail_clearly(project, monkeypatc
     class UnsupportedForm(ReportForm[UnsupportedAnalysis]):
         def build(self) -> UnsupportedAnalysis:
             return UnsupportedAnalysis(
-                start="2026-06-01", end="2026-06-03", columns=["f"],
+                start="2026-06-01", end="2026-06-03",
                 window=17, evaluator="custom",
             )
 
@@ -604,7 +612,7 @@ def test_nested_form_alias_scopes_round_trip_schema_defaults_and_submission(
 
         def build(self) -> CustomAnalysis:
             return CustomAnalysis(
-                start="2026-06-01", end="2026-06-03", columns=["f"],
+                start="2026-06-01", end="2026-06-03",
                 window=self.nested.count + self.optional.count + sum(item.count for item in self.items),
             )
 

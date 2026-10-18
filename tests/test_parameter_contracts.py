@@ -61,7 +61,7 @@ STAGES = (
      {"model": "model_test:Model", "optimize": "optimize_test:Optimize",
       "control": "control_test:Control"}),
 )
-FORMS = ((FactorParams, FactorAnalysisParams, FactorReportForm, {"columns": ["f"]}), *STAGES)
+FORMS = ((FactorParams, FactorAnalysisParams, FactorReportForm, {}), *STAGES)
 PARAMETERS = (
     (FactorAnalysisParams, {"columns": ["f"]}),
     (StrategyParams, {}), (StrategyAnalysisParams, {}),
@@ -86,11 +86,13 @@ class WindowForm(ReportForm[WindowAnalysis]):
     def build(self) -> WindowAnalysis:
         return WindowAnalysis(
             start=self.start, end=self.end, window=self.window,
-            universe=Universe(pool=self.pool), columns=["momentum"],
+            universe=Universe(pool=self.pool),
         )
 
 
 class WindowFactor(Factor[WindowParams]):
+    columns = ["momentum"]
+
     def compute(self, start: date, end: date) -> pd.DataFrame:
         raise AssertionError("contract tests must not compute or query")
 
@@ -222,7 +224,7 @@ def test_shared_form_preserves_ui_and_concrete_analysis_contract(
     assert schema["properties"]["end"]["default"] == "2027-01-01"
     assert schema["additionalProperties"] is False
     assert {"start", "end", "pool"} <= set(schema["properties"])
-    assert not {"universe", "lookback", "config", "symbols"} & set(schema["properties"])
+    assert not {"universe", "lookback", "config", "symbols", "columns"} & set(schema["properties"])
     assert all(not field.get("x-hidden") for field in schema["properties"].values())
     built = form.model_validate({**DATES, **values}).build()
     assert type(built) is analysis
@@ -256,8 +258,11 @@ def test_factor_form_defaults_match_web_research_settings():
         "period": 1, "price_column": "open_hfq", "max_lag": 1, "groups": 5,
         "n_select": 10, "weight": "market_value", "calendar_symbol": "000300.XSHG",
     }
-    assert FactorReportForm.model_fields["columns"].is_required()
-    built = FactorReportForm(columns=["momentum"]).build()
+    assert "columns" not in FactorReportForm.model_fields
+    assert "columns" not in FactorReportForm.model_json_schema()["properties"]
+    built = FactorReportForm().build()
+    assert built.columns == []
+    assert built.model_dump(mode="json")["columns"] == []
     assert (built.period, built.price_column, built.max_lag) == (1, "open_hfq", 1)
     assert built.return_columns == ["P1L1"]
     assert built.groups == 5
@@ -267,7 +272,9 @@ def test_factor_form_defaults_match_web_research_settings():
     first = built.return_columns
     first.append("P1L2")
     assert built.return_columns == ["P1L1"]
-    assert FactorReportForm(columns=["momentum"]).max_lag == 1
+    assert FactorReportForm().max_lag == 1
+    with pytest.raises(ValidationError, match="columns.*[\\s\\S]*extra_forbidden"):
+        FactorReportForm(columns=["momentum"])
 
 
 @pytest.mark.parametrize("runtime,analysis,form,values", FORMS)
@@ -295,10 +302,9 @@ def test_form_cross_field_dates_are_validated_by_build_not_constructor(
         ({"columns": ["P5L3"], "period": 5, "max_lag": 3}, "分析保留列重名"),
     ],
 )
-def test_factor_form_analysis_cross_field_validation_is_deferred(updates, message):
-    form = FactorReportForm.model_validate({**DATES, "columns": ["f"], **updates})
+def test_internal_factor_analysis_keeps_column_validation(updates, message):
     with pytest.raises(ValidationError, match=message):
-        form.build()
+        FactorAnalysisParams.model_validate({**DATES, "columns": ["f"], **updates})
 
 
 @pytest.mark.parametrize("runtime,analysis,form,selectors", STAGES)
@@ -377,15 +383,18 @@ def test_direct_custom_factor_form_builds_exact_analysis_and_projects_runtime(mo
     assert WindowAnalysis.model_validate_json(analysis.model_dump_json()) == analysis
     report = FactorAnalysisResult(
         **{name: pd.DataFrame() for name in FactorAnalysisResult.filenames},
-        parameters=analysis.model_copy(deep=True),
+        parameters=analysis.model_copy(deep=True, update={"columns": list(WindowFactor.columns)}),
     )
     analyze = Mock(return_value=report)
     monkeypatch.setattr("scheme.execute.factor.api.analyze_factors", analyze)
+    assert analysis.columns == []
     result = analysis.run(WindowFactor)
     assert_type(result, FactorAnalysisResult[WindowAnalysis])
     assert result is report
     factor, received = analyze.call_args.args
     assert received is analysis
+    assert received.columns == list(WindowFactor.columns) == ["momentum"]
+    assert received.model_dump(mode="json")["columns"] == ["momentum"]
     assert type(factor.params) is WindowParams
     assert factor.params.window == 7
     assert set(factor.params.model_dump()) == {"universe", "window"}
@@ -438,11 +447,13 @@ def test_factor_algorithm_periods_are_independent_from_analysis_holding_period(m
         pass
 
     class PeriodFactor(Factor[RuntimeParams]):
+        columns = ("momentum",)
+
         def compute(self, start, end):
             raise AssertionError("projection tests must not compute or query")
 
     form = FactorReportForm[Analysis](
-        **DATES, columns=["momentum"], periods=20, period=5,
+        **DATES, periods=20, period=5,
         price_column="open_hfq", max_lag=3,
     )
     params = form.build()
@@ -464,6 +475,7 @@ def test_factor_algorithm_periods_are_independent_from_analysis_holding_period(m
     assert factor.params.periods == 20
     assert factor.params.model_dump() == runtime.model_dump()
     assert analysis is params
+    assert analysis.columns == list(PeriodFactor.columns) == ["momentum"]
 
 
 def test_factor_run_revalidates_missing_or_invalid_concrete_runtime(monkeypatch):
@@ -630,6 +642,8 @@ def test_typevar_multilevel_factor_parameter_resolution():
     P = TypeVar("P", bound=FactorParams)
 
     class FactorGeneric(Factor[P], Generic[P]):
+        columns = ["momentum"]
+
         def compute(self, start: date, end: date) -> pd.DataFrame:
             raise AssertionError("must not compute")
 
@@ -653,6 +667,8 @@ def test_unparameterized_factor_mixin_does_not_hide_concrete_parameters():
         pass
 
     class Concrete(FactorMixin, Factor[WindowParams]):
+        columns = ["momentum"]
+
         def compute(self, start: date, end: date) -> pd.DataFrame:
             raise AssertionError("must not compute")
 

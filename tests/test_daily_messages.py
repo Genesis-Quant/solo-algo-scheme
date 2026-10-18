@@ -1,3 +1,6 @@
+import ast
+import inspect
+import textwrap
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -11,6 +14,26 @@ from scheme.execute.strategy import api
 from scheme.execute.strategy.api import ResearchBacktest
 
 COLUMNS = ["open", "close", "pre_close", "up_limit", "down_limit"]
+
+
+def test_reusable_message_helpers_are_literals_in_constructor():
+    tree = ast.parse(textwrap.dedent(inspect.getsource(ResearchBacktest.__init__)))
+    scripts = [
+        node.args[0].value for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "run" and node.args
+        and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)
+    ]
+    assert len(scripts) == 1
+    script = scripts[0]
+    assert "def soloDailyMessages(daily)" in script
+    assert "def soloTickMessages(raw, reference, universe)" in script
+    assert "fixedLengthArrayVector(double(raw.BidPrice1)" in script
+    assert "quotes = lj(quotes, refs, `tradeDate`symbol)" in script
+    assert 'throw "Snapshot reference prices are missing"' in script
+    assert not any(
+        isinstance(node, ast.Name) and node.id == "files" for node in ast.walk(tree)
+    )
 
 
 class Session:

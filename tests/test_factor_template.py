@@ -44,8 +44,6 @@ def test_template_closed_interval_uses_half_open_universe_query(template, monkey
             self.data = pd.DataFrame({
                 "time": days,
                 "code": ["000001.SZ"] * len(days),
-                "industry_l0": [1.0] * len(days),
-                "circ_mv": [100.0] * len(days),
                 "momentum": [day.day / 100 for day in days],
             })
 
@@ -63,13 +61,13 @@ def test_template_closed_interval_uses_half_open_universe_query(template, monkey
         current["result"] = Result(first, last)
         return current["result"]
 
-    def preprocess(self, data, *, session, columns):
+    def preprocess(self, data, *, session):
         result = current["result"]
         assert data == result.data_ref
         assert session is result.session
-        assert columns == ["momentum"]
+        assert self.columns == ["momentum"]
         preprocessing.append(data)
-        frame = result.data[["time", "code", *columns]].copy()
+        frame = result.data[["time", "code", *self.columns]].copy()
         frame = frame.rename(columns={"time": "date", "code": "symbol"})
         frame["symbol"] = frame["symbol"].str.replace(".SZ", ".XSHE", regex=False)
         return frame.set_index(["date", "symbol"]).sort_index()
@@ -84,7 +82,13 @@ def test_template_closed_interval_uses_half_open_universe_query(template, monkey
     assert calls[0][0:2] == (start, end + timedelta(days=1))
     assert calls[0][2]["lookback"] == timedelta(days=110)
     assert calls[0][2]["filters"] == [Universe.member]
-    assert calls[0][2]["factors"] == ["industry_l0", "circ_mv"]
+    assert "factors" not in calls[0][2]
+    assert set(calls[0][2]["derivatives"]) == {"adjusted_close", "momentum"}
+    assert template.Factor.__dict__["columns"] == ["momentum"]
+    assert "columns" not in template.FactorAnalysisParams.__annotations__
+    assert not template.FactorAnalysisParams.model_fields["columns"].is_required()
+    assert template.FactorAnalysisParams(start=start, end=end).columns == []
+    assert "columns" not in template.FactorReportForm.model_fields
     assert preprocessing == ["templateFactorData"]
     assert panel.index.get_level_values("date").date.tolist() == pd.bdate_range(start, end).date.tolist()
     assert set(panel.index.get_level_values("symbol")) == {"000001.XSHE"}

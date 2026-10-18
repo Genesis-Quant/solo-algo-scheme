@@ -1,8 +1,9 @@
-"""Arena 托管股票池：全市场或指数动态池，按两阶段查询逐日判定成分。
+"""固定全时段证券域中的逐日股票池成员，不预筛选区间候选代码。
 
-指数池先由 codes_query 选出研究区间内的候选并集，第二阶段只查询这些代码，并注入同一个成员节点
-``Universe.member``（Arena 的 ``stock_pool_member``）作为逐日成分列，不参与过滤；全市场没有第一阶段，该列恒为 true。
-成分来自 CoreData 的指数权重：某日观察到该指数权重时，其他代码缺失的权重先填 0，再按代码前向填充。
+codes 留空，由 scheme.data.query 在进程首次空 codes 查询时读取并缓存 CoreData
+全时间范围内出现过记录的所有代码；导入模块不连接数据库，后续查询复用该证券域。
+日期轴沿用 Runtime 的真实 close 交易日。成员来自 CoreData 指数权重，
+缺失权重按观测日补零后逐代码前向填充；成员列默认仅输出，由调用者选择 filters 或 on。
 """
 
 from collections.abc import Sequence
@@ -13,24 +14,16 @@ from typing import Any, ClassVar
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 from runtime.apps.query import FactorQuery
-from runtime.apps.query import api as query_api
 from runtime.apps.query.result import QueryResult
-from runtime.database import create_session
 
+from .api import query
 from .symbols import engine_symbol
 
 __all__ = ["MEMBERS", "StockPool", "Universe"]
 
-CODES_REFS = {
-    "source_ref": "soloUniverseCodesSourceData",
-    "computed_ref": "soloUniverseCodesComputedData",
-    "filtered_ref": "soloUniverseCodesFilteredData",
-    "data_ref": "soloUniverseCodesData",
-}
-
 
 class StockPool(StrEnum):
-    """与 Arena 网页股票池选项一一对应。"""
+    """研究表单可选的全市场及指数动态池。"""
 
     ALL = "全市场"
     SSE50 = "上证 50"
@@ -39,7 +32,6 @@ class StockPool(StrEnum):
     CSI1000 = "中证 1000"
 
 
-# 每个股票池的成员节点 DSL，须逐日返回 BOOL，可以写成复合条件；全市场恒为 true，没有第一阶段。
 MEMBERS: dict[StockPool, dict[str, Any]] = {
     StockPool.ALL: {"type": "DIRECT", "op": "nullary.true", "fields": {}, "params": {}},
     StockPool.SSE50: {
@@ -68,30 +60,11 @@ def _dates(start: date, end: date) -> dict[str, str]:
 
 
 class Universe(BaseModel):
-    """研究和回测共用的股票池；日期由所属参数提供。
-
-    DSL 用 ``Universe.member`` 引用逐日成分节点，例如 ``"on": Universe.member``。
-    """
+    """请求 codes 留空，由 query 补齐进程级证券域；member 逐日判定股票池。"""
 
     model_config = ConfigDict(extra="forbid")
-
-    # 值必须与 Arena 托管节点名一致。
     member: ClassVar[str] = "stock_pool_member"
-
     pool: StockPool = Field(default=StockPool.ALL, title="股票池")
-
-    def codes_query(self, start: date, end: date) -> FactorQuery | None:
-        """第一阶段：结果代码的区间并集作为第二阶段 codes；全市场没有第一阶段。"""
-        if self.pool == StockPool.ALL:
-            return None
-        return FactorQuery.model_validate({
-            **_dates(start, end),
-            "lookback": "P0D",
-            "codes": [],
-            "factors": [],
-            "derivatives": {self.member: MEMBERS[self.pool]},
-            "filters": [self.member],
-        })
 
     def dataset_query(
         self,
@@ -103,11 +76,7 @@ class Universe(BaseModel):
         derivatives: dict[str, Any] | None = None,
         filters: Sequence[str] = (),
     ) -> FactorQuery:
-        """第二阶段：注入成员节点，codes 留空，运行时由候选并集或全市场填充。
-
-        成员节点只作为逐日 BOOL 列输出，不参与过滤。下游可把 Universe.member 作为 on，
-        放入 filters 只保留当日成分，或读取该列自行处理；DSL 不能重新定义它。
-        """
+        """注入成员列，不缩小证券域，不隐式添加成员过滤。"""
         derivatives = dict(derivatives or {})
         if self.member in {*factors, *derivatives}:
             raise ValueError(f"{self.member} 由股票池注入，DSL 不能重新定义")
@@ -130,23 +99,14 @@ class Universe(BaseModel):
         derivatives: dict[str, Any] | None = None,
         filters: Sequence[str] = (),
     ) -> QueryResult:
-        """在同一会话依次执行两阶段查询；结果对象负责关闭会话，需在 with 内读取数据。"""
-        dataset = self.dataset_query(
+        """只执行一次全数据域查询；在结果的 with 内访问数据。"""
+        request = self.dataset_query(
             start, end, lookback=lookback, factors=factors, derivatives=derivatives, filters=filters,
         )
-        codes_query = self.codes_query(start, end)
-        session = create_session(max_time=query_api.QUERY_SESSION_MAX_TIME)
-        try:
-            if codes_query is not None:
-                codes = query_api.execute_codes_query(codes_query, session=session, **CODES_REFS)
-                dataset = dataset.model_copy(update={"codes": codes})
-            return query_api.execute_query(dataset, session=session)
-        except BaseException:
-            session.close()
-            raise
+        return query(request)
 
     def evaluate(self, start: date, end: date) -> pd.DataFrame:
-        """返回 [start, end) 的逐日成分面板：列为候选并集（全市场为查询轴代码），值为当日成员节点。"""
+        """返回全部查询证券的逐日成员面板，缺行情不删除证券列。"""
         with self.query(start, end) as result:
             members = result.session.run(f"""
                 select date(time) as date, string(code) as code, {self.member} as member

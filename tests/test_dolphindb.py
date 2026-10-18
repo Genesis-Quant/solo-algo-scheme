@@ -249,6 +249,7 @@ def test_real_tick_adapter_and_account():
 
 class TestFactor(Factor[FactorParams]):
     __test__ = False
+    columns = ["score"]
 
     def compute(self, start: date, end: date) -> pd.DataFrame:
         index = pd.MultiIndex.from_product(
@@ -260,6 +261,7 @@ class TestFactor(Factor[FactorParams]):
 
 class SparseFactor(Factor[FactorParams]):
     __test__ = False
+    columns = ["score"]
 
     def compute(self, start: date, end: date) -> pd.DataFrame:
         index = pd.MultiIndex.from_product(
@@ -403,6 +405,8 @@ def test_real_holding_returns_keep_missing_prices_sparse_factor_dates_and_end_bo
     })
 
     class SparseDates(Factor[FactorParams]):
+        columns = ["score"]
+
         def compute(self, start: date, end: date) -> pd.DataFrame:
             index = pd.MultiIndex.from_product(
                 [days[[0, 2, 3]], ["000001.XSHE", "600000.XSHG"]],
@@ -432,12 +436,12 @@ def test_real_holding_returns_keep_missing_prices_sparse_factor_dates_and_end_bo
 @pytest.mark.parametrize("pool,weight,size", [
     (StockPool.CSI300, "weight_000300SH", 300), (StockPool.SSE50, "weight_000016SH", 50),
 ])
-def test_real_index_pool_runs_arena_two_stage_query(pool, weight, size):
+def test_real_index_pool_runs_one_query_over_fixed_codes(pool, weight, size):
     universe = Universe(pool=pool)
     start, end = date(2024, 6, 1), date(2024, 8, 1)
     panel = universe.evaluate(start, end)
-    # 第一阶段只取区间候选并集：每个候选都至少入池一天，逐日成分数与指数一致。
-    assert panel.any().all()
+    # 全时段证券域保留区间外代码，不要求每个代码在当前区间内入池。
+    assert not panel.any().all()
     assert (panel.sum(axis=1) == size).all()
     stacked = panel.stack()
     members = set(stacked[stacked].index)
@@ -454,7 +458,7 @@ def test_real_index_pool_runs_arena_two_stage_query(pool, weight, size):
             select date(time) as date, string(code) as code from {CORE_TABLE}
             where factor = `{weight}, time >= 2024.06.01, time < 2024.08.01, value > 0
         """)
-    # 第二阶段不过滤：候选并集的每个交易日都有一行，成员节点作为列输出。
+    # 单阶段不过滤：固定证券域的每个真实交易日都有一行，成员节点作为列输出。
     assert len(frame) == panel.size
     member_rows = frame[Universe.member].eq(True)
     assert member_rows.eq(frame[weight] > 0).all()
@@ -473,9 +477,10 @@ def test_real_index_pool_runs_arena_two_stage_query(pool, weight, size):
     assert set(zip(pd.to_datetime(frame.time), frame.code.map(engine_symbol), strict=True)) == members
 
 
-def test_real_all_market_pool_has_no_first_stage():
+def test_real_all_market_pool_uses_fixed_process_codes():
     universe = Universe()
-    assert universe.codes_query(date(2024, 7, 1), date(2024, 7, 6)) is None
+    assert not hasattr(universe, "codes_query")
+    assert universe.dataset_query(date(2024, 7, 1), date(2024, 7, 6)).codes == []
     panel = universe.evaluate(date(2024, 7, 1), date(2024, 7, 6))
     assert len(panel) == 5
     assert len(panel.columns) > 4000

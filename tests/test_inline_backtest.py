@@ -44,7 +44,9 @@ class FakeResult:
     def return_summary(self):
         return self.session.run(
             "backtest::standardize_return_summary("
-            "Backtest::getReturnSummary(coreBacktestEngine), portfolios, 250, 0.04)"
+            "Backtest::getReturnSummary(coreBacktestEngine), "
+            "Backtest::getDailyTotalPortfolios(coreBacktestEngine), "
+            "coreBacktestAnnualTradingDays, coreBacktestRiskFreeRate)"
         )
 
     def close(self):
@@ -99,7 +101,27 @@ def inline(monkeypatch):
         if utils:
             session.run(utils)
         session.run("\n".join(callbacks.values()))
-        session.run("backtest::run_backtest(name, config, message)")
+        if market_source == "snapshot":
+            session.run("""
+                coreBacktestSnapshotState = dict(STRING,ANY)
+                coreBacktestSnapshotState["enabled"] = false
+                coreBacktestEngine = backtest::run_snapshot_backtest(
+                    coreBacktestName, coreBacktestConfig, coreBacktestSnapshotTable,
+                    coreBacktestSnapshotReference, coreBacktestCodes, coreBacktestTradeDates,
+                    coreBacktestBenchmarkMessage,
+                    initialize, beforeTrading, onBar, onSnapshot, onOrder, onTrade,
+                    afterTrading, finalize
+                )
+            """)
+        else:
+            session.run(f"""
+                coreBacktestTradeDates = coreBacktestAvailableTradeDates
+                coreBacktestEngine = backtest::run_backtest(
+                    coreBacktestName, coreBacktestConfig, {message_ref},
+                    initialize, beforeTrading, onBar, onSnapshot, onOrder, onTrade,
+                    afterTrading, finalize
+                )
+            """)
         if runtime.fail:
             raise RuntimeError("runtime failed")
         return FakeResult(session)
@@ -116,6 +138,14 @@ def inline(monkeypatch):
     def query(*args, **kwargs):
         return None
 
+    query_api = ModuleType("runtime.apps.query.api")
+    query_api.execute_query = query
+    query_result = ModuleType("runtime.apps.query.result")
+    query_result.QueryResult = type("QueryResult", (), {})
+    monkeypatch.setitem(sys.modules, "runtime.apps.query.api", query_api)
+    monkeypatch.setitem(sys.modules, "runtime.apps.query.result", query_result)
+    sys.modules["runtime.apps.query"].api = query_api
+    sys.modules["runtime.apps.query"].FactorQuery = type("FactorQuery", (), {})
     sys.modules["runtime.apps.query"].execute_query = query
 
     # 独立包名避免触发 scheme.__init__ 和真实配置；实际包源码原样加载。
@@ -138,11 +168,11 @@ def _scripts(session):
 
 
 def _inline_loads(session):
-    return [script for script in _scripts(session) if "def build_backtest_message(" in script]
+    return [script for script in _scripts(session) if "def getParams()" in script]
 
 
 def test_public_api_signature_and_binding(inline):
-    assert inline.api.query is inline.query
+    assert inline.data.query is inline.api.query
     assert inline.api.backtest is inline.module.backtest
     assert inline.data.backtest is inline.module.backtest
     assert inline.module.backtest.__wrapped__ is inline.runtime.run_backtest
@@ -195,8 +225,7 @@ def test_failed_inline_load_is_not_marked_loaded(inline):
 @pytest.mark.parametrize("name", [
     "getParams", "getParam", "getIndustry", "getTradeDates", "getHistoryData",
     "getLastData", "getMinuteHistory", "order_target", "order_target_value",
-    "build_backtest_message", "run_backtest", "run_snapshot_backtest",
-    "standardize_return_summary", "backtest_order_quote", "create_backtest_engine",
+    "backtest_order_quote",
     "read_stock_snapshots", "build_minute_bars", "build_stock_snapshot_message",
     "snapshot_callback",
 ])
@@ -273,7 +302,9 @@ def test_lazy_result_keeps_proxy_and_existing_close_semantics(inline):
         assert isinstance(result.session, inline.module._InlineBacktestSession)
         summary = result.return_summary
         assert "backtest::" not in summary
-        assert "standardize_return_summary(" in summary
+        assert "standardize_return_summary(" not in summary
+        assert "if (size(values) > 0)" in summary
+        assert summary.strip().endswith("result")
         assert "Backtest::getReturnSummary(" in summary
         assert any('loadPlugin("MatchingEngineSimulator")' in s for s in _scripts(borrowed))
         # 已有结果的代理传回公开入口不增加包裹或重复内联。
@@ -300,52 +331,154 @@ def test_error_closes_only_wrapper_owned_session(inline, owned):
     assert raw.close_count == int(owned)
 
 
-def test_resource_contains_exact_pinned_runtime_dependency_closure(inline):
-    # 仅 AST 读取已安装源码：绝不 import Runtime 编译器或配置。
-    root = Path(sys.prefix) / "Lib/site-packages/runtime/database/compile/backtest/functions"
+def test_helpers_are_literals_at_session_initialization_and_roots_are_not_defs(inline):
+    tree = ast.parse((_SOURCE / "backtest.py").read_text(encoding="utf-8"))
+    run = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "run"
+    )
+    literals = [
+        node.args[0].value for node in ast.walk(run)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "run" and node.args
+        and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)
+    ]
+    helper_script = next(script for script in literals if "def getParams()" in script)
+    names = set(re.findall(r"(?m)^\s*def (\w+)\(", helper_script))
+    assert names == inline.module._FUNCTIONS
+    assert {"getHistoryData", "order_target", "getMinuteHistory", "snapshot_callback"} <= names
+    all_text = "\n".join(
+        node.value for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    )
+    assert not re.search(
+        r"\bdef (?:run_backtest|run_snapshot_backtest|build_backtest_message|"
+        r"standardize_return_summary|create_backtest_engine)\(", all_text,
+    )
+    assert not any(
+        isinstance(node, ast.ImportFrom) and node.module == "importlib.resources"
+        for node in ast.walk(tree)
+    )
+    assert "arena_backtest.dos" not in all_text
+
+
+@pytest.mark.parametrize("target,data,adj,spread", [
+    ("customMessage", "coreBacktestData", "coreBacktestAdj", "coreBacktestSyntheticSpread"),
+    ("coreBacktestBenchmarkMessage", "coreBacktestBenchmarkData", "NULL", "0.0"),
+])
+def test_message_root_is_expanded_in_place(inline, target, data, adj, spread):
+    raw = FakeSession()
+    proxy = inline.module._InlineBacktestSession(raw)
+    proxy.run(
+        f"before=1; {target} = backtest::build_backtest_message({data}, {adj}, {spread}); after=2",
+        1, clearMemory=True,
+    )
+    script, args, kwargs = raw.calls[-1]
+    assert script.startswith("before=1;") and script.endswith("; after=2")
+    assert f"market_data = {data}" in script
+    assert f"adj = {adj}" in script and f"synthetic_spread = {spread}" in script
+    assert f"{target} = message" in script
+    assert "backtest::" not in script and "def build_backtest_message(" not in script
+    assert 'endsWith(codes, ".XSHE")' in script
+    assert args == (1,) and kwargs == {"clearMemory": True}
+
+
+def test_two_message_expansions_preserve_benchmark_filter_and_union(inline):
+    raw = FakeSession()
+    inline.module._InlineBacktestSession(raw).run("""
+        custom = backtest::build_backtest_message(
+            coreBacktestData, coreBacktestAdj, coreBacktestSyntheticSpread)
+        custom = select * from custom where string(symbol) != coreBacktestBenchmark
+        if (custom.rows() == 0) { throw "empty" }
+        coreBacktestBenchmarkMessage = backtest::build_backtest_message(
+            coreBacktestBenchmarkData, NULL, 0.0)
+        custom = unionAll(custom, coreBacktestBenchmarkMessage)
+        custom.sortBy!(`timestamp`symbol)
+    """)
+    script = _scripts(raw)[-1]
+    assert script.index("market_data = coreBacktestData") < script.index("custom = select")
+    assert script.index("custom = select") < script.index("market_data = coreBacktestBenchmarkData")
+    assert script.index("market_data = coreBacktestBenchmarkData") < script.index("custom = unionAll")
+    assert "backtest::" not in script
+
+
+@pytest.mark.parametrize("market_source", ["daily", "snapshot"])
+def test_run_roots_and_engine_creation_are_statements(inline, market_source):
+    result = inline.data.backtest({}, {}, market_source=market_source, message_ref="customMessage")
+    script = _scripts(result.session.raw_session)[-1]
+    assert "coreBacktestEngine = engine" in script
+    assert "Backtest::createBacktestEngine(" in script
+    assert "Backtest::dropBacktestEngine(engine)" in script and "throw error" in script
+    assert "def run_backtest(" not in script and "def run_snapshot_backtest(" not in script
+    assert "create_backtest_engine(" not in script
+    assert "backtest::" not in script
+    assert 'config["orderBookMatchingRatio"] = 1.0' in script
+    if market_source == "snapshot":
+        assert 'coreBacktestSnapshotState["enabled"] = false' in script
+        assert "wrapped = snapshot_callback{,,,on_snapshot_callback}" in script
+        assert "for (day in days)" in script and "for (block in firstBlock..lastBlock)" in script
+        assert "read_stock_snapshots(source,day,codes" in script
+        assert "build_stock_snapshot_message(raw,dayReference)" in script
+        assert 'state["enabled"] = false' in script
+        create = script[script.index("engine = Backtest::createBacktestEngine("):]
+        assert re.search(r"on_bar_callback,\s*wrapped,", create)
+    else:
+        assert "message = customMessage" in script
+        assert "lastRow = imax(message.timestamp)" in script
+        assert 'update endMessage set symbol="END", timestamp=timestamp+1' in script
+
+
+def test_root_names_inside_literals_comments_and_symbols_are_not_expanded(inline):
+    raw = FakeSession()
+    protected = r'''// backtest::run_backtest(x)
+/* backtest::build_backtest_message(x) */
+a = "backtest::standardize_return_summary(x)"
+b = `backtest::run_snapshot_backtest
+Backtest::createBacktestEngine(name, config)
+'''
+    inline.module._InlineBacktestSession(raw).run(protected)
+    assert _scripts(raw) == [protected]
+
+
+@pytest.mark.parametrize("script", [
+    "x = backtest::build_backtest_message(other, NULL, 0.0)",
+    "coreBacktestEngine = backtest::run_backtest(x, y, z)",
+    "coreBacktestEngine = backtest::run_snapshot_backtest(x, y, z)",
+    "backtest::standardize_return_summary(x, y, z)",
+])
+def test_unrecognized_root_call_is_rejected_without_sending_dos(inline, script):
+    raw = FakeSession()
+    with pytest.raises(ValueError, match="不支持的 Runtime"):
+        inline.module._InlineBacktestSession(raw).run(script)
+    assert not raw.calls
+
+
+def test_pinned_runtime_call_sites_are_supported_without_importing_runtime(inline):
+    root = Path(sys.prefix) / "Lib/site-packages/runtime/apps/backtest"
     if not root.is_dir():
         pytest.skip("当前解释器没有锁定版本的 Runtime 源码")
-    definitions = {}
-    for path in root.glob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in tree.body:
-            if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+    # AST 只提取 Runtime 实际 session.run/download 字面量，不执行其配置或数据库代码。
+    namespace = {
+        "DATA_REF": "coreBacktestData", "BENCHMARK_DATA_REF": "coreBacktestBenchmarkData",
+        "BENCHMARK_MESSAGE_REF": "coreBacktestBenchmarkMessage", "message_ref": "customMessage",
+        "run_message_ref": "coreBacktestRunMessage", "message_statement": "prefix = 1",
+    }
+    count = 0
+    for filename in ("api.py", "result.py"):
+        tree = ast.parse((root / filename).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in {"run", "download"} and node.args):
                 continue
-            if not isinstance(node.value.func, ast.Name) or node.value.func.id != "DolphinDBFunction":
+            value = node.args[0]
+            if not isinstance(value, (ast.Constant, ast.JoinedStr)):
                 continue
-            fields = {field.arg: field.value for field in node.value.keywords}
-            assert ast.literal_eval(fields["module"]) == "backtest"
-            dependencies = fields.get("dependencies", ast.Tuple(elts=[]))
-            definitions[node.targets[0].id] = (
-                inspect.cleandoc(ast.literal_eval(fields["definition"])),
-                [dependency.id for dependency in dependencies.elts],
-            )
-    tree = ast.parse((root / "__init__.py").read_text(encoding="utf-8"))
-    roots = next(
-        node.value.elts for node in tree.body
-        if isinstance(node, ast.Assign) and node.targets[0].id == "BACKTEST_FUNCTIONS"
-    )
-    assert len(roots) == 13
-    ordered = []
-    seen = set()
-
-    def visit(name):
-        if name in seen:
-            return
-        seen.add(name)
-        definition, dependencies = definitions[name]
-        for dependency in dependencies:
-            visit(dependency)
-        ordered.append(definition)
-
-    for root in roots:
-        visit(root.id)
-    script = inline.module._BACKTEST_SCRIPT.read_text(encoding="utf-8")
-    assert len(ordered) == 19
-    assert script == "\n\n".join(ordered) + "\n"
-    names = set(re.findall(r"(?m)^def (\w+)\(", script))
-    assert names == inline.module._FUNCTIONS
-    assert not re.search(r"(?m)^\s*(?:module|use)\b|\b(?:factor|common|ta|backtest)::", script)
-    assert "Backtest::dropBacktestEngine(engine)" in script
-    assert "throw error" in script
-    assert "objByName(\"coreBacktestSnapshotState\")" in script
+            if "backtest::" not in ast.unparse(value):
+                continue
+            script = eval(compile(ast.Expression(value), filename, "eval"), {}, namespace)
+            raw = FakeSession()
+            inline.module._InlineBacktestSession(raw).run(script)
+            assert "backtest::" not in _scripts(raw)[-1]
+            assert not re.search(r"\bdef (?:run_backtest|run_snapshot_backtest|build_backtest_message|standardize_return_summary|create_backtest_engine)\(", _scripts(raw)[-1])
+            count += 1
+    assert count == 6

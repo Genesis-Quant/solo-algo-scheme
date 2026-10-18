@@ -45,7 +45,7 @@ from scheme.base import (
 from scheme.manage.parameters import _analysis_type, _form_schema, defaults, inspect_project
 
 CASES = (
-    (FactorReportForm, FactorAnalysisParams, {"columns": ["momentum"]}),
+    (FactorReportForm, FactorAnalysisParams, {}),
     (ModelReportForm, ModelAnalysisParams, {}),
     (OptimizeReportForm, OptimizeAnalysisParams, {"model": "model_example:ModelAlgo"}),
     (ControlReportForm, ControlAnalysisParams, {
@@ -83,7 +83,7 @@ def test_thin_form_automatically_exposes_business_fields(base, analysis, selecto
         "type": "integer", "title": "窗口", "description": "交易日",
         "exclusiveMinimum": 0, "unit": "days",
     }
-    assert not {"universe", "config", "symbols"} & schema["properties"].keys()
+    assert not {"universe", "config", "symbols", "columns"} & schema["properties"].keys()
     initial = defaults(ProjectForm)
     assert initial["labels"] == ["base"]
     assert "window" not in initial
@@ -204,18 +204,22 @@ def test_analysis_overrides_replace_fields_without_mutating_shared_defaults():
 
     form_type = FactorReportForm[Analysis]
     initial = defaults(form_type)
-    assert initial["columns"] == ["custom"]
+    assert "columns" not in initial
+    assert "columns" not in form_type.model_fields
+    assert "columns" not in form_type.model_json_schema()["properties"]
     assert initial["n_select"] == 7
     assert initial["begin"] == "2025-01-01"
     assert initial["weight"] == "market_value"
     assert form_type().build().columns == ["custom"]
+    with pytest.raises(ValidationError, match="columns.*[\\s\\S]*extra_forbidden"):
+        form_type(columns=[])
     with pytest.raises(ValidationError, match="columns"):
-        form_type(columns=[]).build()
+        Analysis(start="2025-01-01", end="2025-01-03", columns=[])
     with pytest.raises(ValidationError, match="n_select"):
         form_type(n_select=2).build()
-    form_type.model_fields["columns"].json_schema_extra = {"project_only": True}
-    assert Analysis.model_fields["columns"].json_schema_extra is None
-    assert FactorReportForm.model_fields["columns"].is_required()
+    form_type.model_fields["n_select"].json_schema_extra = {"project_only": True}
+    assert Analysis.model_fields["n_select"].json_schema_extra is None
+    assert "columns" not in FactorReportForm.model_fields
     assert defaults(FactorReportForm)["n_select"] == 10
 
 
@@ -554,7 +558,7 @@ def test_stage_selector_names_are_reserved_for_strategy_projects(base, analysis,
 
 def test_factor_projects_may_use_stage_names():
     target = create_model("NamedFactorAnalysis", __base__=FactorAnalysisParams, model=(str, "ridge"))
-    assert FactorReportForm[target](columns=["f"]).build().model == "ridge"
+    assert FactorReportForm[target]().build().model == "ridge"
 
 
 def test_internal_fields_without_form_input_need_defaults():
@@ -615,11 +619,13 @@ def test_real_cli_and_factor_freeze_keep_dates_only_in_analysis(
         window: int = Field(default=20, ge=1, alias="days")
 
     class Analysis(RuntimeParams, FactorAnalysisParams):
-        columns: list[str] = Field(default_factory=lambda: ["momentum"], min_length=1)
+        pass
 
     calls = []
 
     class CustomFactor(Factor[RuntimeParams]):
+        columns = ["momentum"]
+
         def __init__(self, params):
             calls.append(("init", params))
             super().__init__(params)
@@ -644,6 +650,9 @@ def test_real_cli_and_factor_freeze_keep_dates_only_in_analysis(
     definition = json.loads(capsys.readouterr().out)
     assert definition["protocol"] == 2
     assert definition["values"]["form"]["days"] == 20
+    assert "columns" not in definition["values"]["form"]
+    assert "columns" not in definition["schemas"]["form"]["properties"]
+    assert Form().build().columns == []
     assert calls == []
     values = {
         **definition["values"]["form"], "days": 30, "pool": StockPool.CSI500,
@@ -661,6 +670,7 @@ def test_real_cli_and_factor_freeze_keep_dates_only_in_analysis(
     assert "window" not in payload["analysis"]
     assert payload["analysis"]["start"] == "2026-06-01"
     assert payload["analysis"]["end"] == end
+    assert payload["analysis"]["columns"] == list(CustomFactor.columns) == ["momentum"]
     assert payload["factor"]["universe"] == payload["analysis"]["universe"] == {"pool": "中证 500"}
     if validate_factor:
         assert len(calls) == 2

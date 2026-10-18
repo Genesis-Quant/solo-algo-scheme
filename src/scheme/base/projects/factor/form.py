@@ -17,9 +17,9 @@ P = TypeVar("P", bound=FactorAnalysisParams, infer_variance=True)
 class FactorReportForm(ResearchForm[P], Generic[P]):
     _analysis_base = FactorAnalysisParams
     _analysis_model = FactorAnalysisParams
+    _internal_fields = ResearchForm._internal_fields | {"columns"}
 
     end: date = Field(default=date(2027, 1, 1), title="结束日期（含）")
-    columns: list[str] = Field(min_length=1, title="因子列")
     period: int = Field(default=1, ge=1, strict=True, title="持有期（交易日）")
     price_column: Literal["open", "close", "open_hfq", "close_hfq"] = Field(
         default="open_hfq", title="收益价格字段",

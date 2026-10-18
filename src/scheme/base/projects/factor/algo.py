@@ -1,8 +1,10 @@
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from datetime import date
+from functools import wraps
+from inspect import isabstract
 from random import sample
-from typing import Generic, TypeVar
+from typing import ClassVar, Generic, TypeVar
 
 import pandas as pd
 from backtest import DosVar
@@ -43,18 +45,68 @@ def _panel_dates(panel: pd.DataFrame, context: str) -> pd.DatetimeIndex:
     return pd.DatetimeIndex(dates)
 
 
+def _validate_result(
+    panel: pd.DataFrame, columns: Sequence[str], context: str,
+) -> pd.DataFrame:
+    """严格核对全部输出列，并将 time/code 平表转为既有面板。"""
+    if not isinstance(panel, pd.DataFrame):
+        raise ValueError(f"{context}：compute 必须返回 DataFrame")
+    if not panel.columns.is_unique:
+        raise ValueError(f"{context}：因子列不能重复")
+    if panel.empty:
+        raise ValueError(f"{context}：因子面板不能为空或没有因子列")
+    raw = not isinstance(panel.index, pd.MultiIndex) and {"time", "code"} <= set(panel.columns)
+    expected = ["time", "code", *columns] if raw else list(columns)
+    missing = [column for column in expected if column not in panel.columns]
+    extra = [column for column in panel.columns if column not in expected]
+    if missing or extra:
+        raise ValueError(f"{context}：因子列不一致，缺少 {missing}，额外 {extra}")
+    if raw:
+        panel = panel.set_index(["time", "code"]).rename_axis(["date", "symbol"])
+    _panel_dates(panel, context)
+    return panel
+
+
 class Factor(ABC, Generic[P]):
     """因子计算基类；参数只提供股票池及算法设置，不包含日期。
 
     计算日期由 compute 的闭区间 [start, end] 显式指定，不参与 Algo 事件回调。
+    具体类必须显式声明 columns，compute 不得返回未声明的因子或暴露列。
     """
+
+    columns: ClassVar[list[str] | tuple[str, ...]]
+
+    def __init_subclass__(cls, **kwargs) -> None:
+        super().__init_subclass__(**kwargs)
+        if not isabstract(cls) or "columns" in cls.__dict__:
+            columns = getattr(cls, "columns", None)
+            if not isinstance(columns, (list, tuple)) or not columns or any(
+                not isinstance(column, str) or not column.strip() or "\0" in column
+                for column in columns
+            ):
+                raise TypeError(f"{cls.__name__}.columns 必须显式声明为非空有效字符串 list/tuple")
+            if len(set(columns)) != len(columns):
+                raise ValueError(f"{cls.__name__}.columns 因子列不能重复")
+            if set(columns) & {
+                "time", "code", "date", "symbol", "stock_pool_member", "circ_mv", "industry_l0",
+            }:
+                raise ValueError(f"{cls.__name__}.columns 因子列不能与键、暴露或分析保留列重名")
+        compute = cls.__dict__.get("compute")
+        if compute is not None and not getattr(compute, "__isabstractmethod__", False):
+            @wraps(compute)
+            def checked_compute(self, *args, **kwargs):
+                return _validate_result(
+                    compute(self, *args, **kwargs), self.columns, f"{type(self).__name__}.compute",
+                )
+
+            cls.compute = checked_compute
 
     def __init__(self, params: P) -> None:
         self.params = params
 
     @abstractmethod
     def compute(self, start: date, end: date) -> pd.DataFrame:
-        """返回闭区间 [start, end] 的面板；索引为 date、symbol，列为具名因子。
+        """返回闭区间 [start, end] 的 columns 因子，可用 (date, symbol) 面板或 time/code 平表。
 
         start == end 为正常单日区间，start > end 非法。
         去极值、标准化、中性化等处理由因子实现包含在返回结果中。
@@ -66,7 +118,6 @@ class Factor(ABC, Generic[P]):
         data: pd.DataFrame | DosVar,
         *,
         session=None,
-        columns: Sequence[str] | None = None,
         market_value_column: str = "circ_mv",
         industry_column: str = "industry_l0",
         settings: DolphinSettings | None = None,
@@ -74,11 +125,11 @@ class Factor(ABC, Generic[P]):
         """在 compute 返回前调用 DOS 去极值、标准化和市值/动态行业中性化。
 
         接受 time/code 普通列或 (date, symbol) 面板；DosVar 必须显式传 session。
-        缺失暴露仅按输入日期和证券补查；已有暴露原样使用。无效或退化记录保留
-        为 NULL，不生成分组；返回唯一、排序的 (date, symbol) 数值因子面板。
+        因子列来自 self.columns；暴露按输入日期和证券独立查询。无效或退化记录
+        保留为 NULL，不生成分组；返回唯一、排序的 (date, symbol) 数值因子面板。
         """
         return preprocess(
-            data, session=session, columns=columns,
+            data, session=session, columns=self.columns,
             market_value_column=market_value_column, industry_column=industry_column,
             settings=settings,
         )
@@ -95,8 +146,12 @@ class Factor(ABC, Generic[P]):
         if start > end:
             raise ValueError("日期区间必须满足 start <= end，采用 [start, end]")
 
-        panel = self.compute(start, end)
-        dates = _panel_dates(panel, f"全区间 {start} 至 {end}")
+        context = f"全区间 {start} 至 {end}"
+        try:
+            panel = self.compute(start, end)
+        except ValueError as error:
+            raise ValueError(f"{context}：{error}") from error
+        dates = _panel_dates(panel, context)
         outside = (dates < pd.Timestamp(start)) | (dates > pd.Timestamp(end))
         if outside.any():
             raise ValueError(
@@ -111,7 +166,10 @@ class Factor(ABC, Generic[P]):
         ]
         for day, expected in snapshots:
             context = f"样本日期 {day}"
-            actual = self.compute(day, day)
+            try:
+                actual = self.compute(day, day)
+            except ValueError as error:
+                raise ValueError(f"{context}：{error}") from error
             actual_dates = _panel_dates(actual, context)
             if not (actual_dates == pd.Timestamp(day)).all():
                 raise ValueError(

@@ -48,7 +48,7 @@ scheme/
 参数按三层职责组织：
 
 - `FactorParams` 只提供 `universe`，项目子类声明算法字段，不携带 `start/end`。`StrategyParams` 仍包含 `start`、`end`、`universe`；四类 Algo 的 Params 从统一策略参数提取自身算法字段，不携带回测配置。
-- `FactorAnalysisParams(FactorParams)` 声明 `start`、`end` 和 `columns`、`period`、`price_column`、`max_lag` 等分析选项，日期由分析器直接传给 `Factor.compute(start,end)`。`StrategyAnalysisParams(StrategyParams)` 增加行情、基准和回测引擎设置；都实现 `run` 并返回报告。各环节的 `Model/Optimize/Control/ExecutionAnalysisParams` 直接继承对应的 Algo Params，增加独立研究所需的日期、股票池、回测设置和上游选择。
+- `FactorAnalysisParams(FactorParams)` 声明 `start`、`end` 和 `period`、`price_column`、`max_lag` 等分析选项，日期由分析器直接传给 `Factor.compute(start,end)`；输出 `columns` 只在具体 Factor 类上声明，表单不提供该输入；Analysis 的同名字段默认为空，仅由执行流程自动绑定以写入报告元数据，不需手填。`StrategyAnalysisParams(StrategyParams)` 增加行情、基准和回测引擎设置；都实现 `run` 并返回报告。各环节的 `Model/Optimize/Control/ExecutionAnalysisParams` 直接继承对应的 Algo Params，增加独立研究所需的日期、股票池、回测设置和上游选择。
 - 五类公共 Form 由 Scheme 提供，项目只绑定自己的 AnalysisParams。`start/end/pool` 统一定义；四类策略环节还共享行情、基准、资金和费率。Scheme 负责 `pool → Universe`、资金费率 → `config` 以及 `build()`，不执行研究。
 
 项目自定义 AnalysisParams 同时继承本项目的具体 Params 与对应 Scheme AnalysisParams；算法字段只在 Params 声明一次。公共 Form 会自动读取具体 AnalysisParams 的字段、默认值、约束和 JSON Schema 元数据，`build()` 返回该具体类型，并执行它的字段及跨字段校验。运行时根据 Factor/Algo 的参数泛型构造新的具体 Params，只传算法声明的字段，不把分析字段泄漏给算法。
@@ -73,14 +73,13 @@ class ModelReportForm(BaseModelReportForm[ModelAnalysisParams]):
 
 这里不需要再声明日期、股票池、手续费、选股数量，也不需要项目自己实现 `build()`。
 Factor、Optimize、Control、Execution 使用对应的公共 Form，同样只绑定具体分析类型。
-Factor 的项目输出列可以在项目 AnalysisParams 中声明一次，例如
-`columns: list[str] = Field(default_factory=lambda: ["momentum"], min_length=1, title="因子列")`。
+Factor 的项目输出列只在具体 Factor 类上声明一次，例如 `columns = ["momentum"]`；AnalysisParams 和 Form 不再重复声明或手填，预处理和分析均读取同一份类声明。
 确实需要不同 UI 默认值时，仍可在 Form 子类覆盖对应字段。
 
 - Form 保留既有 UI 默认：日期 `2020-01-01` 至 `2027-01-01`，股票池沪深 300。因子分析为闭区间 `[start,end]`，包含结束日，允许单日；策略回测仍为 `[start,end)`。直接构造分析参数时日期必填，构造 `FactorParams` 时不传日期。
 - 基础分析字段未被项目覆盖时沿用 Scheme 的 UI 默认；项目显式重新声明的字段保留项目约束和默认。Factor 表单的市值加权默认不会被 Analysis 的等权默认意外覆盖。
 - 算法的 Pydantic decorator validators 在 `build()` 构造具体 AnalysisParams 时执行，不要求表单提前具备 `universe/config`；`build()` 不会调用 `run()`。项目新增的业务字段保留原始输入和 Schema，将转换、约束及模型校验统一推迟到 `build()`，避免转换两次或绕过算法的 strict/字符串规范化配置。不能把单独构造 Form 当作完整研究参数已经校验通过。
-- 项目在 AnalysisParams 中重新声明的平台字段（如 `start`、`benchmark`、`columns`）若只修改默认值、标题或约束，仍由表单校验并规范化，传给下游环节的公共值保持规范；带 Annotated 转换器、字段 validator 或嵌套模型时，与业务字段一样推迟到 `build()` 只执行一次。
+- 项目在 AnalysisParams 中重新声明的平台字段（如 `start`、`benchmark`）若只修改默认值、标题或约束，仍由表单校验并规范化，传给下游环节的公共值保持规范；带 Annotated 转换器、字段 validator 或嵌套模型时，与业务字段一样推迟到 `build()` 只执行一次。
 - 自动表单支持无参 `default_factory`；依赖其他已校验字段的默认工厂无法独立生成 UI 默认值，会在绑定时明确拒绝。字段间推导请放到 AnalysisParams 的 `model_validator`，或继续使用自定义 `ReportForm`。
 - `universe/config/symbols` 不直接暴露为 UI 输入，股票池通过 `pool` 选择。引擎配置可以直接构造 AnalysisParams；策略 AnalysisParams 的额外 `config` 默认项会保留，资金和费率由表单输入决定。表单不提供的内部字段（如 `symbols`）在项目中重新声明时必须有默认值，否则绑定表单时报错。
 - `pool/cash/commission/tax` 等表单转换字段及表单方法名不能再作为另一个含义的算法字段；冲突明确报错，不静默覆盖。四类策略环节中，`model/optimize/control/execution` 是 Scheme 管理的上下游选择字段，项目参数不能声明同名字段。
@@ -153,10 +152,19 @@ logger.info("训练完成：%d 个样本", count)
 
 独立研究进程没有配置标准库日志时，研究包（`factor`、`model_1a2b` 等平台包名及其子模块）、Notebook（`__main__`）、`backtest` 和 `scheme` 的标准库日志按所选级别输出；其他第三方库只输出 WARNING 及以上。宿主已配置标准库日志时，保留已有处理器和 root 级别，日志继续由宿主处理，不替换或关闭其日志文件。Scheme 自身日志的格式和级别设置仍然生效。
 
+### 1.9.0 因子列声明、独立暴露查询与固定证券域
+
+- 因子输出列只在 `Factor.columns` 声明，表单与 `preprocess` 不再重复输入；每次 `compute` 返回后严格检查缺列、额外列和重复列。支持 `time/code` 平表或 `(date, symbol)` 面板，运行、保存与报告自动使用全部声明列。
+- `Factor.preprocess` 始终在独立查询会话获取行业、市值，再按输入 `time/code` 左连接；不预取或复用输入中的暴露，支持完全本地生成的因子。缺失或退化记录保留键及 NULL，保持原始 MAD、总体标准化与含截距 SVD OLS 数值口径；修正会话清理和日期类型转换。
+- 进程首次空 `codes` 查询读取 CoreData 全历史所有记录的代码并集，后续复用固定域；显式代码保持不变。`Universe` 移除两阶段候选预选，单日缺报价不再导致证券消失。
+- 删除全部维护中的 `.dos` 文件和加载器，脚本直接位于调用处；一次性步骤直接展开，仅保留复用函数与插件回调。Backtest 0.1.2 同步改为原生插件调用，修正月报查询。
+
+Scheme 与五类 Algo 模板统一发布 v1.9.0，模板声明 `scheme>=1.9.0,<1.10.0`。本次包含不兼容接口调整，现有项目、冻结环境和历史报告不自动升级或改写。
+
 ### 1.8.0 未来持有收益、内联 DOS 与统一报告筛选
 
 - 因子分析新增 `period`（默认1）和 `price_column`（默认 `open_hfq`，可选 `open/close/open_hfq/close_hfq`）；`max_lag` 生成从t+1开始的入场延迟。`P5L1/P5L2/P5L3` 分别是t+1→t+6、t+2→t+7、t+3→t+8的5交易日simple收益，不再生成因子当日收盘起算的隔夜标签。缺价和末端不足保留NULL，不延长评价结束日。
-- 新增 `Factor.preprocess`，在return前对DataFrame或显式session中的DosVar做DOS去极值、标准化、动态行业/log流通市值中性化及残差再标准化，统一返回 `(date,symbol)` 因子面板。Factor模板已默认调用，原查询同时输出 `industry_l0/circ_mv`。
+- 新增 `Factor.preprocess`，在 return 前对 DataFrame 或显式 session 中的 DosVar 做 DOS 去极值、标准化、动态行业/log 流通市值中性化及残差再标准化，统一返回 `(date,symbol)` 因子面板。Factor 模板默认调用，输出列仅在 Factor 类声明；原查询只读取因子所需字段，暴露始终由预处理另开自有 query 获取并 join。
 - Solo下发脚本仅保留 `use query`；因子统计、预处理和公开数据回测入口的辅助函数内联在会话中，不依赖factor/backtest脚本模块；官方 `Backtest::` 插件接口不变，query服务自身的内部依赖仍由查询服务维护。
 - 报告日期条下新增因子、收益率、IC类型三个全局选择框，统一驱动卡片，切维度保留日期且复用Parquet；衰减保留多收益横轴并突出当前选择。多期重叠收益不生成误导性的净值或年化指标；独立HTML资源同步构建。
 
@@ -322,10 +330,10 @@ from scheme.data import query, backtest
 from scheme.data import ts_api, pro
 ```
 
-`scheme.data` 导出 DolphinDB 的 Arena `query`、`backtest`，以及 Tushare SDK `ts_api` 和 Pro 客户端 `pro`，
+`scheme.data` 导出 DolphinDB 的本地 `query`、`backtest` 包装，以及 Tushare SDK `ts_api` 和 Pro 客户端 `pro`，
 导入前配置 `TUSHARE_TOKEN`；不会在导入时发起数据请求。未使用 Tushare 时无需配置其 token。
 
-`query` 直接导出 Arena 的 `execute_query`；`backtest` 保留 Arena `run_backtest` 的参数和结果契约，但由 Scheme 包装会话，将回测辅助 DOS 内联，不加载 factor/backtest 模块。用户 utils/callbacks 只允许 `use query`，既有 `backtest::` 辅助函数引用转为会话内函数；大写 `Backtest::` 插件接口保持不变。
+`query` 是使用 Arena Runtime 请求/结果类型的本地直接执行包装，不再是 `execute_query` 的 alias。每进程首次 `codes=[]` 从 CoreData 全历史所有记录读取 distinct codes 并缓存为 tuple，不按请求日期或 `close` 筛选证券；后续空 `codes` 复用该域，显式 `codes` 原样保留，导入模块不连接数据库。`backtest` 保留 Arena `run_backtest` 的参数和结果契约，但由 Scheme 包装会话，将回测辅助 DOS 内联，不加载 factor/backtest 模块。用户 utils/callbacks 只允许 `use query`，既有 `backtest::` 辅助函数引用转为会话内函数；大写 `Backtest::` 插件接口保持不变。
 它们返回的结果支持 `with`：退出时关闭查询连接，回测还会销毁其引擎；传入的 session 也由结果关闭。
 需要保留的 DataFrame 在 `with` 内读取。Arena DSL 类型从 `runtime.apps.query` 导入。
 
@@ -345,7 +353,7 @@ with backtest(request, callbacks, config={"cash": 100000}) as result:
     trades = result.trade_details
 ```
 
-这两个 Arena 入口沿用闭区间 `[start_date, end_date]`，结果使用 `time/code` 列与 `.SH/.SZ` 证券代码，
+这两个本地包装沿用 Runtime 的闭区间 `[start_date, end_date]`，结果使用 `time/code` 列与 `.SH/.SZ` 证券代码，
 Solo 提交的脚本仅保留 `use query`，分析统计、预处理及回测辅助函数均在会话内定义，不部署或加载 factor/backtest/common/ta 模块。query 服务自身的模块依赖仍由查询服务维护，不在此处重复内联。Solo 因子计算和分析采用 `[start, end]`；策略回测及共享 `Universe.query/evaluate` 仍采用 `[start, end)`。因子实现调用共享 Universe 时，应传 `end + timedelta(days=1)` 以包含结束日。
 Arena 的 `backtest` 会通过 Tushare 读取股票元数据，因此还需配置 `TUSHARE_TOKEN`。
 
@@ -355,7 +363,7 @@ from scheme.base import FactorAnalysisParams, FactorReportForm
 from scheme.execute.strategy import StrategyAnalysisParams, run_backtest
 
 form = FactorReportForm(
-    start="2025-01-01", end="2026-01-01", columns=["momentum"],
+    start="2025-01-01", end="2026-01-01",
     pool=StockPool.CSI300, period=5, price_column="open_hfq", max_lag=3,
 )
 params = form.build()
@@ -365,7 +373,7 @@ report.save(output_path)
 
 # 也可直接构造分析参数，无需经过表单。
 params = FactorAnalysisParams(
-    start="2025-01-01", end="2026-01-01", columns=["momentum"],
+    start="2025-01-01", end="2026-01-01",
     universe=Universe(pool=StockPool.CSI500),
 )
 report = params.run(Factor)
@@ -402,21 +410,19 @@ snapshot 模式接收 Arena StockSnapshot 的 Market、SecurityID、TradeDate、
 
 ### 因子返回前的 DOS 预处理
 
-`Factor.preprocess` 接收 `time/code/具名因子列` DataFrame、`(date,symbol)` 索引面板，或所属 session 中的 `DosVar`。返回统一为排序且唯一的 `(date,symbol)` DataFrame，仅含所选因子，可直接从 `compute` 返回：
+`Factor.preprocess` 接收 `time/code/具名因子列` DataFrame、`(date,symbol)` 索引面板，或所属 session 中的 `DosVar`。因子数据可完全来自本地计算，不假定已有 query；输出列只取具体 Factor 类的 `columns` 声明，不再向 preprocess 传 columns。返回统一为排序且唯一的 `(date,symbol)` DataFrame，仅含声明的因子，可直接从 `compute` 返回：
 
 ```python
 # 已在Python计算因子，且frame有time/code/momentum列。
-return self.preprocess(frame, columns=["momentum"])
+return self.preprocess(frame)
 
-# 在原查询的with中计算，避免先下载整张原始因子表。
-return self.preprocess(
-    DosVar(result.data_ref), session=result.session, columns=["momentum"],
-)
+# 如因子来自查询，可在其 with 中传入表引用及所属 session。
+return self.preprocess(DosVar(result.data_ref), session=result.session)
 ```
 
-`DosVar` 只是变量名，必须显式传 session。借用的 session 不会被关闭，原输入表和查询缓存不会被改写；helper 用私有临时变量并在结束后清理。缺少暴露列时只按输入日期、证券补查；建议原查询显式输出 `industry_l0`、`circ_mv`，避免额外查询。
+`DosVar` 只是变量名，必须显式传所属 session。因子输入与暴露查询分开：preprocess 始终另开自有（owned）query，按输入日期和证券读取动态行业/市值暴露后 join 因子，不要求原数据来自 query，也不让因子查询预取暴露或沿用输入中的暴露列。借用的因子 session 不关闭，原输入表和查询缓存不改写；独立 query 负责关闭自己的 session，临时变量在结束后清理。
 
-默认按每个日期、每个因子执行 `median ± 3×MAD` 去极值、总体标准差 `stdp` 标准化，以标准化log市值和行业哑变量做含截距SVD OLS，残差再标准化。市值小于1截为1；退化截面、零方差和缺失暴露留NULL，保留原行，不自动添加分组。空表或所选因子全部NULL明确报错。默认暴露为动态 `industry_l0` 与 `circ_mv`，不使用旧应用的静态Tushare行业映射。也可通过 `industry_column`、`market_value_column` 选择输入中的其他暴露列。处理逻辑来自原factor实现，但以会话DOS定义运行，不加载factor模块；正式分析不重复执行预处理。
+默认按每个日期、每个因子执行 `median ± 3×MAD` 去极值、总体标准差 `stdp` 标准化，以标准化log市值和行业哑变量做含截距SVD OLS，残差再标准化。市值小于1截为1；退化截面、零方差和缺失暴露留NULL，保留原行，不自动添加分组。空表或所选因子全部NULL明确报错。默认暴露为动态 `industry_l0` 与 `circ_mv`，不使用旧应用的静态Tushare行业映射。也可通过 `industry_column`、`market_value_column` 选择由独立 query 获取的其他暴露字段。处理逻辑来自原factor实现，但以会话DOS定义运行，不加载factor模块；正式分析不重复执行预处理。
 
 ### 因子收益标签
 
@@ -467,10 +473,9 @@ JSON 中所有 Algo 参数统一写在 `backtest`，`algos` 只描述包与入�
   `MEMBERS` 映射中（股票池 → DSL JSON），须逐日返回 BOOL。当前四个指数池为 `binary.gt(指数权重, 0)`，权重字段分别为
   `weight_000016SH`、`weight_000300SH`、`weight_000905SH`、`weight_000852SH`；全市场为恒真的 `nullary.true`。
   需要复合条件时，把对应股票池的 JSON 改为组合表达式即可。
-- **指数动态池分两阶段。** 第一阶段 `codes_query` 用成员节点过滤，回溯为 `P0D`，取整个研究区间结果代码的并集；
-  它只确定第二阶段要加载的候选代码，不代表这些代码每天都是成分。第二阶段只查询候选并集，并注入同一个成员节点逐日判定成分。
-- **全市场没有第一阶段。** 第二阶段加载查询轴上的全部代码，成员节点恒为 true，不缩小股票池。
-- **第二阶段不按成员过滤。** 结果包含候选代码在每个交易日的行，成员节点作为逐日 BOOL 列 `Universe.member` 输出，
+- **首次空代码查询时固定证券域。** 当前研究进程第一次收到空 `codes` 时，从 CoreData 全历史所有记录读取 distinct codes 并缓存为 tuple；后续空 `codes` 直接复用，不按请求日期、lookback 或 `close` 重新取证券域。显式传入的 `codes` 原样保留。模块导入不连接数据库。
+- **只执行一次查询。** 指数池不再单独执行本地 `codes_query` 预筛选，`dataset_query` 保留 `codes=[]` 并注入成员节点，可直接交给 `scheme.data.query`；`Universe.query` 正是单次执行该对象。全市场成员节点恒为 true。每次查询仍按请求日期获取真实 `close` 交易日轴，不重复读取证券列表；远端 Arena 自身的 `codes_query` 契约不因此改变。
+- **不隐式按成员过滤。** 结果保留固定代码在每个交易日的行，当天缺行情不删除证券；成员节点作为逐日 BOOL 列 `Universe.member` 输出，
   如何使用由下游决定：只保留当日成分时把 `Universe.member` 加入 `filters`；只限制截面计算范围时作为 CS 算符的 `on`，
   例如 `"on": Universe.member`；也可以读取该列自行处理。DSL 直接引用 `Universe.member`，不需要手写节点名，但不能重新定义它。
 - **成分数据。** 指数权重来自 Tushare `index_weight`，每个自然日写入不晚于该日的最新快照。查询时，某日观察到该指数权重后，
@@ -489,21 +494,19 @@ derivatives = {
         "on": Universe.member,
     },
 }
-universe.codes_query(start, end)        # 第一阶段请求；全市场为 None
-universe.dataset_query(start, end, derivatives=derivatives)  # 第二阶段请求：已注入成员列，不过滤
+universe.dataset_query(start, end, derivatives=derivatives)  # 已注入成员列，不过滤
 with universe.query(
     start, end, lookback=timedelta(days=60), derivatives=derivatives,
     filters=[Universe.member],          # 下游自行决定：只保留当日成分
 ) as result:
-    frame = result.data                 # 两阶段在同一会话执行，在 with 内读取
+    frame = result.data                 # 单次查询，在 with 内读取
 
 params = StrategyParams(start="2026-06-01", end="2026-07-01", universe=universe)
 panel = params.universe.evaluate(params.start, params.end)
 ```
 
-面板索引名为 `date`，为查询区间的交易日；列为第一阶段的候选并集（全市场为查询轴代码，`.XSHG/.XSHE`），
-值为当日的成员节点 `Universe.member`。退池后为 `False`，某天没有成员时保留全 `False` 行；指数池在整个区间没有成员时，
-第一阶段按 Arena 规则报错。
+面板索引名为 `date`，为查询区间的交易日；列为进程首次空 `codes` 查询时固定的证券列表（`.XSHG/.XSHE`），
+值为当日的成员节点 `Universe.member`。退池后为 `False`，某天或整个区间没有成员时保留全 `False`，不因某日缺行情重新缩小证券域。
 Strategy 的 `universe` 属性首次访问时查询并缓存这张面板。Factor 不再持有依赖参数日期的缓存属性；在 `compute(start,end)` 内使用 `self.params.universe` 按传入日期查询。
 Algo 可通过 `self.backtest.universe` 读取；回测未指定 `symbols` 时按面板列名加载行情，
 每日是否选股由 Algo 根据对应日期的布尔值判断。显式 `symbols` 仅控制行情加载范围。

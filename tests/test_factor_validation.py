@@ -25,6 +25,8 @@ def make_panel(days=DAYS):
 
 
 class OfflineFactor(Factor[FactorParams]):
+    columns = ["score", "auxiliary"]
+
     def __init__(self, panel, change=None):
         super().__init__(FactorParams())
         self.panel = panel
@@ -121,7 +123,10 @@ def test_validation_accepts_numeric_tolerance_dtype_changes_and_equal_null_masks
         result["object"] = [2, 3]
         return result
 
-    assert OfflineFactor(panel, close_values).validate(START, START) is None
+    class MixedFactor(OfflineFactor):
+        columns = ["score", "auxiliary", "label", "flag", "category", "object"]
+
+    assert MixedFactor(panel, close_values).validate(START, START) is None
 
 
 @pytest.mark.parametrize("object_side", ["full", "single", "both"])
@@ -176,8 +181,11 @@ def test_validation_compares_every_numeric_and_nonnumeric_column(column, value, 
         result.loc[(START, SYMBOLS[0]), column] = value
         return result
 
+    class MixedFactor(OfflineFactor):
+        columns = ["score", "auxiliary", "label", "flag"]
+
     with pytest.raises(ValueError, match=f"(?s){START}.*{detail}"):
-        OfflineFactor(panel, change).validate(START, START)
+        MixedFactor(panel, change).validate(START, START)
 
 
 @pytest.mark.parametrize("expected,actual", [(np.nan, 0.0), (0.0, np.nan), (np.nan, 1e-12)])
@@ -276,6 +284,8 @@ def test_validation_snapshots_all_sampled_dates_before_compute_reuses_frame(monk
     monkeypatch.setattr(algo, "sample", lambda population, count: population[:count])
 
     class ReusingFactor(Factor[FactorParams]):
+        columns = ["score", "auxiliary"]
+
         def __init__(self):
             super().__init__(FactorParams())
             self.panel = make_panel([START, END])
@@ -322,6 +332,8 @@ def test_validation_catches_late_day_values_depending_on_full_interval_start(mon
     monkeypatch.setattr(algo, "sample", lambda population, count: population[-count:])
 
     class IntervalDependentFactor(Factor[FactorParams]):
+        columns = ["score", "auxiliary"]
+
         def compute(self, start, end):
             panel = make_panel([day for day in DAYS if start <= day <= end])
             panel["score"] = panel.groupby(level="symbol")["score"].cumsum()

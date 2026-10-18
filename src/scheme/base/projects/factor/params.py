@@ -32,7 +32,7 @@ class FactorAnalysisParams(FactorParams):
 
     start: date = Field(title="开始日期")
     end: date = Field(title="结束日期（含）")
-    columns: list[str] = Field(min_length=1, title="因子列")
+    columns: list[str] = Field(default_factory=list, title="因子列（内部运行与报告元数据）")
     period: int = Field(default=1, ge=1, strict=True, title="持有期（交易日）")
     price_column: Literal["open", "close", "open_hfq", "close_hfq"] = Field(
         default="open_hfq", title="收益价格字段",
@@ -58,7 +58,7 @@ class FactorAnalysisParams(FactorParams):
         if len(set(self.columns)) != len(self.columns):
             raise ValueError("因子列不能重复")
         reserved = {
-            "date", "symbol", "time", "code", "circ_mv",
+            "date", "symbol", "time", "code", "stock_pool_member", "circ_mv", "industry_l0",
             *self.return_columns,
         }
         if set(self.columns) & reserved:
@@ -79,6 +79,13 @@ class FactorAnalysisParams(FactorParams):
             for lag, name in enumerate(self.return_columns, start=1)
         }
 
+    def _bind_columns(self, factor: "type[Factor]") -> None:
+        """类声明是运行与报告的唯一列来源；不修改类上的可变列表。"""
+        columns = list(factor.columns)
+        # 绑定时也验证按本次 period/max_lag 动态生成的收益列冲突。
+        self.model_copy(update={"columns": columns}).validate_analysis()
+        self.columns = columns
+
     def run(
         self, factor: "type[Factor[P]]", *, settings: "DolphinSettings | None" = None
     ) -> "FactorAnalysisResult[Self]":
@@ -89,5 +96,6 @@ class FactorAnalysisParams(FactorParams):
 
         if not isinstance(factor, type) or not issubclass(factor, Factor):
             raise TypeError("run 需要 Factor 类")
+        self._bind_columns(factor)
         params = project_parameters(parameter_type(factor), self)
         return analyze_factors(factor(params), self, settings=settings)

@@ -192,7 +192,7 @@ def test_month_report_uses_previous_month_end(output):
     )
     assert (engine.progress.orders, engine.progress.rejected) == (0, 0)
     assert queries == [
-        "select top 1 * from getDailyTotalPortfolios(engine) "
+        "select top 1 * from Backtest::getDailyTotalPortfolios(engine) "
         "where tradeDate < soloProgressDate order by tradeDate desc"
     ]
     assert uploaded["soloProgressDate"] == np.datetime64("2023-02-01", "D")

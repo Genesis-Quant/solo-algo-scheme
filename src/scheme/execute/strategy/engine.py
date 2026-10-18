@@ -73,7 +73,7 @@ class Backtest(BaseBacktest[C], Generic[C]):
             return
         self.session.upload({"soloProgressDate": np.datetime64(moment.date(), "D")})
         portfolios = self.get_records(
-            "select top 1 * from getDailyTotalPortfolios(engine) "
+            "select top 1 * from Backtest::getDailyTotalPortfolios(engine) "
             "where tradeDate < soloProgressDate order by tradeDate desc",
             DailyPortfolio,
         )

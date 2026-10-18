@@ -197,6 +197,7 @@ def inspect_project(
             raise ValueError(
                 f"因子分析自定义字段无法由标准分析器或 Factor 参数保存：{sorted(unsupported)}"
             )
+        analysis._bind_columns(algo_type)
         factor_params = project_parameters(factor_model, analysis)
         analysis_params = project_parameters(FactorAnalysisParams, analysis)
         if validate_factor:
