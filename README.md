@@ -152,6 +152,14 @@ logger.info("训练完成：%d 个样本", count)
 
 独立研究进程没有配置标准库日志时，研究包（`factor`、`model_1a2b` 等平台包名及其子模块）、Notebook（`__main__`）、`backtest` 和 `scheme` 的标准库日志按所选级别输出；其他第三方库只输出 WARNING 及以上。宿主已配置标准库日志时，保留已有处理器和 root 级别，日志继续由宿主处理，不替换或关闭其日志文件。Scheme 自身日志的格式和级别设置仍然生效。
 
+### 1.10.0 对数收益与统一分组曲线
+
+- 因子收益标签统一为 `ln(price[t+lag+period] / price[t+lag])`，元数据为 `kind="log"`；保持原价格字段、未来入场滞后与闭区间边界，任一非正或缺失价格端点保留 NULL。
+- 分组、多空曲线统一使用当前及前 `period-1` 个交易期收益的算术平均；开头使用已有期数，窗口含 NULL 时保留缺口，不额外除以持有期或混合不同 lag。窗口先按完整交易日历计算，再截取所选日期。
+- 分组净值为平均对数收益累加后的指数；多空累计、年化和波动使用同一对数序列，IC 与原始分组结果不预平滑。移除多期曲线和统计的禁用分支，独立 HTML 与 Notebook 报告同步更新。
+
+Scheme 与五类 Algo 模板统一发布 v1.10.0，模板声明 `scheme>=1.10.0,<1.11.0`。仅供新项目选择，现有项目的依赖、源码、保存版本与历史结果不自动升级或重算；报告按实际元数据识别收益口径。
+
 ### 1.9.0 因子列声明、独立暴露查询与固定证券域
 
 - 因子输出列只在 `Factor.columns` 声明，表单与 `preprocess` 不再重复输入；每次 `compute` 返回后严格检查缺列、额外列和重复列。支持 `time/code` 平表或 `(date, symbol)` 面板，运行、保存与报告自动使用全部声明列。
@@ -426,18 +434,22 @@ return self.preprocess(DosVar(result.data_ref), session=result.session)
 
 ### 因子收益标签
 
-因子检验使用 `period`（收益持有期，默认1）、`price_column`（价格字段，默认 `open_hfq`）和 `max_lag`（入场延迟上限，默认1）。两个整数均要求严格正整数；价格字段可选 `open`、`close`、`open_hfq`、`close_hfq`。对 `k=1..max_lag` 生成 `P{period}L{k}`，公式为 `price_column(t+k+period)/price_column(t+k)-1`。起点最早为因子日的下一个交易日，不再允许因子当日收盘价起算隔日收益。`period=5, price_column="open_hfq", max_lag=3` 时：
+因子检验使用 `period`（收益持有期，默认1）、`price_column`（价格字段，默认 `open_hfq`）和 `max_lag`（入场延迟上限，默认1）。两个整数均要求严格正整数；价格字段可选 `open`、`close`、`open_hfq`、`close_hfq`。对 `k=1..max_lag` 生成对数收益 `P{period}L{k}(t)=ln(price_column(t+k+period)/price_column(t+k))`，即 `lag=k>=1`，入场和退出使用同一价格字段。起点最早为因子日的下一个交易日，不允许因子当日收盘价起算隔日收益。`period=5, price_column="open_hfq", max_lag=3` 时：
 
-| 字段 | 后复权开盘价区间 | 简单收益公式 |
+| 字段 | 后复权开盘价区间 | log 收益公式 |
 | --- | --- | --- |
-| `P5L1` | t+1 → t+6 | `open_hfq(t+6) / open_hfq(t+1) - 1` |
-| `P5L2` | t+2 → t+7 | `open_hfq(t+7) / open_hfq(t+2) - 1` |
-| `P5L3` | t+3 → t+8 | `open_hfq(t+8) / open_hfq(t+3) - 1` |
+| `P5L1` | t+1 → t+6 | `ln(open_hfq(t+6) / open_hfq(t+1))` |
+| `P5L2` | t+2 → t+7 | `ln(open_hfq(t+7) / open_hfq(t+2))` |
+| `P5L3` | t+3 → t+8 | `ln(open_hfq(t+8) / open_hfq(t+3))` |
 
-直接读取所选价格字段，后复权字段不再乘 `adj_factor`。收益通过 Arena query DSL 在 DolphinDB 中按完整查询交易日轴计算，不能在已筛选或稀疏的因子面板上位移，也不能跳过缺行情寻找下一条非空价格。所有标签与 t 日因子配对，收益是 simple 而非 log。
-Factor 面板上传后，在同一 DolphinDB 会话内拼接收益率、过滤因子空值、生成分组并调用内联统计函数计算报告；不再 `use factor`，也不重复处理 Factor 的预处理。默认等权，market_value 使用 circ_mv；只生成分组标签，不修改因子值。
-因子评价行情只读取 `[start,end]`，包含结束日但不读取之后的价格；持有期和滞后都不会扩展查询结束日。未来入场或退出端点缺价时对应列为 NULL，较早的 lag 仍可能有效，不填零、不因某个标签为空删除其它可评价标签；这些行仍保留因子、分组及换手。默认 `P1L1` 需要 t+1 和 t+2 两个未来报价。
-报告记录 `kind=simple, periods=period, lag=k, price_column=所选字段, turnover_period=period`，不把入场延迟当作持有期。换手独立比较因子分组在 period 个完整交易日间隔下的变化，不等同实际成交换手；`period>1` 的逐日收益相互重叠，不能直接连乘冒充可交易净值。
+直接读取所选价格字段，后复权字段不再乘 `adj_factor`。收益通过 Arena query DSL 在 DolphinDB 中按完整查询交易日轴计算，不能在已筛选或稀疏的因子面板上位移，也不能跳过缺行情寻找下一条非空价格。所有 log 标签与 t 日因子配对。
+Factor 面板上传后，在同一 DolphinDB 会话内拼接收益率、过滤因子空值、生成分组并调用内联统计函数计算报告；不再 `use factor`，也不重复处理 Factor 的预处理。默认等权，market_value 使用 circ_mv；只生成分组标签，不修改因子值。各组 raw 收益仍是当日有效 log 标签的加权均值；IC/RankIC 直接使用当日因子与原始 log 标签，不平滑。
+因子评价行情只读取 `[start,end]`，包含结束日但不读取之后的价格；持有期和滞后都不会扩展查询结束日。未来入场或退出端点缺价或非正时对应列为 NULL，较早的 lag 仍可能有效，不填零、不因某个标签为空删除其它可评价标签；这些行仍保留因子、分组及换手。默认 `P1L1` 需要 t+1 和 t+2 两个未来报价。
+报告记录 `kind=log, periods=period, lag=k, price_column=所选字段, turnover_period=period`，不把入场延迟当作持有期。换手独立比较因子分组在 period 个完整交易日间隔下的变化，不等同实际成交换手。
+
+报告对每个因子、收益列和分组分别计算有效序列：`effective(t)=mean(raw(t),...,raw(t-period+1))`，即当前及前 `period-1` 个交易期 raw log 收益的算术平均。开头不足 period 个交易期时使用已有样本；不额外除以 period，不平均不同 lag。先补齐完整交易日轴，缺失日期保留 NULL，窗口中任一 raw 为 NULL 则当期 effective 为 NULL。日期选择先在报告全表上计算窗口再截取，不在所选起点重启窗口；`period=1` 使用同一规则。
+
+分组净值为 `exp(cumsum(effective))`。多空先取同日 `high-low` raw log 收益，再使用同一窗口及 NULL 规则；报告时序的 `value=effective` 仍为 log，`cumulative=cumsum(effective)` 为 logsum，不把它们直接当成简单收益或净值。均值、年化、波动率和 Sharpe 都基于同一有效序列的非 NULL 观测：均值为 logmean，年化为 `logmean*252`，波动率为 `std(effective)*sqrt(252)`，零无风险利率下 Sharpe 为 `logmean/std(effective)*sqrt(252)`。所有持有期统一生成曲线和统计；NULL 日期保留断点，不补零，不可定义的指标保留 NULL。
 旧报告中的 `r0o/r1/r1o/r2` 与 `return_N` 保持原收益规格，不自动解释成新参数、不改写历史文件。评价交易日轴由 calendar_symbol（默认沪深300）行情确定，缺少基准数据报错。
 未来收益只进入评价，不能传给 Model。默认风险平价缺少历史样本或求解失败时退化等权并记录原因。
 

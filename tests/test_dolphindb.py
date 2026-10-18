@@ -324,13 +324,19 @@ def test_real_factor_statistics(monkeypatch, tmp_path, weight):
         ),
     )
     assert result.information_coefficient.score_P1L1_ic.tolist() == pytest.approx([-1.0, -1.0])
-    assert result.group_returns.score_P1L1_group0.tolist() == pytest.approx([15 / 11 - 1, 20 / 15.4 - 1])
+    assert result.group_returns.time.tolist() == pd.DatetimeIndex(prices.time.unique()).tolist()
+    assert result.group_returns.score_P1L1_group0.iloc[:2].tolist() == pytest.approx([
+        np.log(15 / 11), np.log(20 / 15.4),
+    ])
+    assert result.group_returns.drop(columns="time").iloc[2:].isna().all().all()
     assert result.processed_data.score.tolist() == [1.0, 2.0, 2.0, 1.0]
     assert result.processed_data.score_group.tolist() == [0, 1, 1, 0]
     assert result.processed_data.P1L1.tolist() == pytest.approx([
-        15 / 11 - 1, 15.4 / 12 - 1, 18 / 15 - 1, 20 / 15.4 - 1,
+        np.log(15 / 11), np.log(15.4 / 12), np.log(18 / 15), np.log(20 / 15.4),
     ])
-    assert result.processed_data.P1L2.iloc[:2].tolist() == pytest.approx([18 / 15 - 1, 20 / 15.4 - 1])
+    assert result.processed_data.P1L2.iloc[:2].tolist() == pytest.approx([
+        np.log(18 / 15), np.log(20 / 15.4),
+    ])
     assert result.processed_data.P1L2.iloc[2:].isna().all()
     assert set(result.group_turnover.periods) == {1}
     assert result.execution_statistics.source_count.tolist() == [2, 2]
@@ -424,13 +430,178 @@ def test_real_holding_returns_keep_missing_prices_sparse_factor_dates_and_end_bo
     assert len(frame) == 6
     first = frame.loc[("000001.XSHE", days[0])]
     assert pd.isna(first.P1L1)
-    assert first.P1L2 == pytest.approx(15 / 12 - 1)
+    assert first.P1L2 == pytest.approx(np.log(15 / 12))
     other = frame.loc[("600000.XSHG", days[0])]
-    assert other[params.return_columns].tolist() == pytest.approx([26 / 22 - 1, 33 / 26 - 1])
+    assert other[params.return_columns].tolist() == pytest.approx([np.log(26 / 22), np.log(33 / 26)])
     for code in ("000001.XSHE", "600000.XSHG"):
         assert frame.loc[(code, days[2]), params.return_columns].isna().all()
         assert frame.loc[(code, days[3]), params.return_columns].isna().all()
     assert set(result.group_turnover.periods) == {1}
+
+
+@pytest.mark.parametrize("period", [1, 5])
+@pytest.mark.parametrize("weight", ["equal", "market_value"])
+def test_real_log_groups_and_ic_keep_raw_labels_and_full_sparse_calendar(monkeypatch, period, weight):
+    days = pd.bdate_range("2025-01-03", periods=11)
+    codes = ["000001.SZ", "000002.SZ", "600000.SH", "600001.SH"]
+    source_codes = [engine_symbol(code) for code in codes]
+    values = np.array([
+        [10, 11, 13, 9, 18, 8, 21, np.nan, 30, 17, 35],
+        [20, 18, 19, 22, 17, 28, 25, 39, 31, 45, 40],
+        [40, 45, 50, 55, 60, 62, 58, 70, 68, 77, 83],
+        [15, 16, 17, 18, 20, 19, 18, 20, 22, 30, 31],
+    ], dtype=float)
+    caps = np.array([1.0, 3.0, 2.0, 5.0])
+    factor_values = {"score": np.array([1.0, 2.0, 3.0, 4.0]), "quality": np.array([4.0, 1.0, 3.0, 2.0])}
+    prices = pd.DataFrame({
+        "time": np.repeat(days, len(codes)), "code": codes * len(days),
+        "open_hfq": values.T.ravel(), "circ_mv": np.tile(caps, len(days)),
+    })
+    valid_positions = [1, 2, 4, 7]
+    observed_positions = [1, 2, 3, 4, 7, 10]
+
+    class SparseCalendarFactor(Factor[FactorParams]):
+        columns = ["score", "quality"]
+
+        def compute(self, start: date, end: date) -> pd.DataFrame:
+            index = pd.MultiIndex.from_product(
+                [days[observed_positions], source_codes], names=["date", "symbol"],
+            )
+            panel = pd.DataFrame({
+                name: np.tile(factor_values[name], len(observed_positions))
+                for name in self.columns
+            }, index=index)
+            # These observed dates have no common valid factor sample; other dates have no rows.
+            panel.loc[(days[[3, 10]], slice(None)), "quality"] = np.nan
+            return panel
+
+    monkeypatch.setattr("scheme.execute.factor.api.query", query_prices(prices))
+    params = FactorAnalysisParams(
+        start=days[0].date(), end=days[-1].date(), period=period, max_lag=3,
+        groups=2, n_select=2, calendar_symbol=source_codes[1], weight=weight,
+    )
+    result = analyze_factors(SparseCalendarFactor(FactorParams()), params)
+    expected_groups = pd.DataFrame(index=pd.DatetimeIndex(days, name="time"))
+    expected_ic = pd.DataFrame(index=pd.DatetimeIndex(days[valid_positions], name="time"))
+    weights = caps if weight == "market_value" else np.ones(len(codes))
+    for factor_name, scores in factor_values.items():
+        order = np.argsort(scores)
+        portfolios = {"bottom": order[:2], "group0": order[:2], "group1": order[2:], "top": order[-2:]}
+        for lag, ret_name in enumerate(params.return_columns, start=1):
+            for portfolio in portfolios:
+                expected_groups[f"{factor_name}_{ret_name}_{portfolio}"] = np.nan
+            expected_ic[f"{factor_name}_{ret_name}_ic"] = np.nan
+            expected_ic[f"{factor_name}_{ret_name}_rank_ic"] = np.nan
+            for position in valid_positions:
+                day = days[position]
+                labels = np.full(len(codes), np.nan)
+                entry, exit_position = position + lag, position + lag + period
+                if exit_position < len(days):
+                    positive = (values[:, entry] > 0) & (values[:, exit_position] > 0)
+                    labels[positive] = np.log(values[positive, exit_position] / values[positive, entry])
+                for portfolio, members in portfolios.items():
+                    valid = members[np.isfinite(labels[members])]
+                    if len(valid):
+                        expected_groups.loc[day, f"{factor_name}_{ret_name}_{portfolio}"] = np.average(
+                            labels[valid], weights=weights[valid],
+                        )
+                valid = np.isfinite(labels)
+                if valid.sum() >= 2:
+                    sample_scores = pd.Series(scores[valid])
+                    sample_labels = pd.Series(labels[valid])
+                    expected_ic.loc[day, f"{factor_name}_{ret_name}_ic"] = sample_scores.corr(sample_labels)
+                    expected_ic.loc[day, f"{factor_name}_{ret_name}_rank_ic"] = sample_scores.rank().corr(
+                        sample_labels.rank(),
+                    )
+    actual_groups = result.group_returns.set_index("time")
+    pd.testing.assert_frame_equal(actual_groups, expected_groups, check_freq=False)
+    pd.testing.assert_frame_equal(
+        result.information_coefficient.set_index("time"), expected_ic, check_freq=False,
+    )
+    missing_days = days[[0, 3, 5, 6, 8, 9, 10]]
+    assert actual_groups.loc[missing_days].isna().all().all()
+    # Group returns are an arithmetic/cap-weighted mean of raw log labels, not log of gross mean.
+    labels = np.log(values[:2, 2 + 1 + period] / values[:2, 2 + 1])
+    group_return = actual_groups.loc[days[2], f"score_P{period}L1_group0"]
+    assert group_return == pytest.approx(np.average(labels, weights=weights[:2]))
+    assert group_return != pytest.approx(np.log(np.average(np.exp(labels), weights=weights[:2])))
+    if period > 1:
+        assert group_return != pytest.approx(np.average(labels, weights=weights[:2]) / period)
+
+
+@pytest.mark.parametrize("price_column", ["open", "close", "open_hfq", "close_hfq"])
+def test_real_p5_log_returns_compile_all_lags_and_reject_nonpositive_endpoints(
+    monkeypatch, price_column,
+):
+    days = pd.bdate_range("2025-01-03", periods=12)
+    calendar = days[:-1]
+    endpoints = [
+        (10.0, 12.0), (np.nan, 12.0), (10.0, np.nan), (np.nan, np.nan),
+        (0.0, 12.0), (10.0, 0.0), (0.0, 0.0),
+        (-10.0, 12.0), (10.0, -12.0), (-10.0, -12.0),
+    ]
+    cases = [(lag, entry, exit_price) for lag in range(1, 4) for entry, exit_price in endpoints]
+    codes = [f"{i + 1:06d}.SZ" for i in range(len(cases))]
+    source_codes = [engine_symbol(code) for code in codes]
+    rows = []
+    for i, (code, (lag, entry, exit_price)) in enumerate(zip(codes, cases, strict=True)):
+        positions = np.arange(len(days), dtype=float)
+        quotes = pd.DataFrame({
+            "time": days, "code": code,
+            "open": 100 + 3 * positions + i,
+            "close": 200 + positions ** 2 + i,
+            "open_hfq": 50 + 2 * positions ** 2 + i,
+            "close_hfq": 70 + 3 * positions ** 2 + i,
+            "adj_factor": 7 + 5 * positions,
+        })
+        quotes.loc[0, price_column] = -999.0  # The signal-day quote is never an endpoint.
+        quotes.loc[lag, price_column] = entry
+        quotes.loc[lag + 5, price_column] = exit_price
+        quotes.loc[len(days) - 1, price_column] = 999999.0  # Outside the closed query interval.
+        rows.append(quotes)
+    prices = pd.concat(rows, ignore_index=True)
+
+    class EndpointFactor(Factor[FactorParams]):
+        columns = ["score"]
+
+        def compute(self, start: date, end: date) -> pd.DataFrame:
+            index = pd.MultiIndex.from_product(
+                [calendar, source_codes], names=["date", "symbol"],
+            )
+            return pd.DataFrame({"score": np.tile(np.arange(len(codes)) + 1.0, len(calendar))}, index=index)
+
+    monkeypatch.setattr("scheme.execute.factor.api.query", query_prices(prices))
+    params = FactorAnalysisParams(
+        start=calendar[0].date(), end=calendar[-1].date(), period=5, max_lag=3,
+        price_column=price_column, groups=2, n_select=2, calendar_symbol=source_codes[0],
+    )
+    result = analyze_factors(EndpointFactor(FactorParams()), params)
+    actual = result.processed_data.set_index(["code", "time"])[params.return_columns].sort_index()
+    expected_rows = []
+    for code, source_code in zip(codes, source_codes, strict=True):
+        values = prices.loc[(prices.code == code) & prices.time.isin(calendar), price_column].to_numpy()
+        for position, day in enumerate(calendar):
+            row = {"code": source_code, "time": day}
+            for lag, name in enumerate(params.return_columns, start=1):
+                entry_position, exit_position = position + lag, position + lag + params.period
+                label = np.nan
+                if exit_position < len(calendar):
+                    entry, exit_price = values[entry_position], values[exit_position]
+                    if entry > 0 and exit_price > 0:
+                        label = np.log(exit_price / entry)
+                row[name] = label
+            expected_rows.append(row)
+    expected = pd.DataFrame(expected_rows).set_index(["code", "time"]).sort_index()
+    pd.testing.assert_frame_equal(actual, expected)
+    assert not np.isinf(actual).any().any()
+    for code, (lag, entry, exit_price) in zip(source_codes, cases, strict=True):
+        label = actual.loc[(code, calendar[0]), f"P5L{lag}"]
+        if entry > 0 and exit_price > 0:
+            assert label == pytest.approx(np.log(exit_price / entry))
+        else:
+            assert pd.isna(label)
+    assert result.group_returns.time.tolist() == calendar.tolist()
+    assert {spec["kind"] for spec in params.return_specs.values()} == {"log"}
 
 
 @pytest.mark.parametrize("pool,weight,size", [

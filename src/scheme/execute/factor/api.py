@@ -39,22 +39,20 @@ def prepare_panel(panel: pd.DataFrame, parameters: FactorAnalysisParams) -> pd.D
 
 
 def _return_derivatives(period: int, max_lag: int, price_column: str) -> dict[str, Any]:
-    def shifted(lag: int) -> dict[str, Any]:
+    def shifted_log(lag: int) -> dict[str, Any]:
         return {
-            "type": "TS", "op": "unary.shift",
-            "fields": {"col": price_column}, "params": {"periods": -lag},
+            "type": "DIRECT", "op": "unary.log", "params": {},
+            "fields": {"col": {
+                "type": "TS", "op": "unary.shift",
+                "fields": {"col": price_column}, "params": {"periods": -lag},
+            }},
         }
 
+    # 等价于 ln(price[t+lag+period] / price[t+lag])；分别取 log，任一非正端点均为 NULL。
     return {
         f"P{period}L{lag}": {
             "type": "DIRECT", "op": "binary.sub",
-            "fields": {
-                "left": {
-                    "type": "DIRECT", "op": "binary.div",
-                    "fields": {"left": shifted(lag + period), "right": shifted(lag)},
-                },
-                "right": 1.0,
-            },
+            "fields": {"left": shifted_log(lag + period), "right": shifted_log(lag)},
         }
         for lag in range(1, max_lag + 1)
     }
@@ -273,8 +271,9 @@ def analyze_factors(
                     }}
                 }}
 
-                // 分组与独立极端组合收益；极端选择先按因子、证券码排序，再处理收益 NULL。
-                soloOutputGroupReturns = select distinct(time) as time from soloFactorProcessed
+                // 分组与独立极端组合对数收益不预平滑；全交易日轴保留无共同因子日期及收益 NULL。
+                // 极端选择先按因子、证券码排序，再处理收益 NULL。
+                soloOutputGroupReturns = table(sort(distinct(timestamp(soloCalendar))) as time)
                 soloOutputGroupReturns.sortBy!(`time)
                 for (soloFactorCol in soloFactors) {{
                     soloFactorSym = symbol([string(soloFactorCol)])[0]

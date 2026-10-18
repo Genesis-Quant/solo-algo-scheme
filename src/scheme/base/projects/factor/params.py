@@ -73,7 +73,7 @@ class FactorAnalysisParams(FactorParams):
     def return_specs(self) -> dict[str, dict[str, str | int]]:
         return {
             name: {
-                "kind": "simple", "periods": self.period, "lag": lag,
+                "kind": "log", "periods": self.period, "lag": lag,
                 "price_column": self.price_column, "turnover_period": self.period,
             }
             for lag, name in enumerate(self.return_columns, start=1)

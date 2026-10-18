@@ -37,6 +37,10 @@ def evaluate_returns(prices, *, period=1, max_lag=1, price_column="open_hfq", ca
         fields = value["fields"]
         if value["op"] == "unary.shift":
             return frame.groupby("code", sort=False)[fields["col"]].shift(value["params"]["periods"])
+        if value["op"] == "unary.log":
+            col = evaluate(fields["col"])
+            # Match Runtime/DolphinDB: NULL and nonpositive log inputs return NULL, never -Inf.
+            return np.log(col.where(col > 0))
         left, right = evaluate(fields["left"]), evaluate(fields["right"])
         if value["op"] == "binary.div":
             return left / right
@@ -65,7 +69,7 @@ def test_parameters_generate_ordered_holding_returns_and_metadata(
     assert list(params.return_specs) == expected
     for lag, name in enumerate(expected, start=1):
         assert params.return_specs[name] == {
-            "kind": "simple", "periods": period, "lag": lag,
+            "kind": "log", "periods": period, "lag": lag,
             "price_column": price_column, "turnover_period": period,
         }
     assert "return_columns" not in params.model_dump()
@@ -199,15 +203,61 @@ def test_p5l1_to_p5l3_use_five_day_holding_returns_after_each_lag(price_column):
     )
     values = prices[price_column].tolist()
     columns = ["P5L1", "P5L2", "P5L3"]
-    assert frame.loc[0, columns].tolist() == pytest.approx([
-        values[6] / values[1] - 1, values[7] / values[2] - 1, values[8] / values[3] - 1,
-    ])
-    assert frame.loc[1, columns].tolist() == pytest.approx([
-        values[7] / values[2] - 1, values[8] / values[3] - 1, values[9] / values[4] - 1,
-    ])
-    assert frame.loc[0, "P5L1"] != pytest.approx(values[1] / values[0] - 1)
+    expected = pd.DataFrame({
+        f"P5L{lag}": pd.Series([
+            np.log(values[row + lag + 5] / values[row + lag])
+            if row + lag + 5 < len(values) else np.nan
+            for row in range(len(values))
+        ])
+        for lag in range(1, 4)
+    })
+    pd.testing.assert_frame_equal(frame[columns], expected)
+    assert frame.loc[0, "P5L1"] != pytest.approx(np.log(values[1] / values[0]))
+    # Labels remain full five-day log returns, not a per-day average or a simple return.
+    label = np.log(values[6] / values[1])
+    assert frame.loc[0, "P5L1"] == pytest.approx(label)
+    assert frame.loc[0, "P5L1"] != pytest.approx(label / 5)
+    assert frame.loc[0, "P5L1"] != pytest.approx(values[6] / values[1] - 1)
     assert pd.notna(frame.loc[1, "P5L3"]) and pd.isna(frame.loc[2, "P5L3"])
     assert frame.loc[4:, columns].isna().all().all()
+
+
+@pytest.mark.parametrize("price_column", PRICE_COLUMNS)
+@pytest.mark.parametrize("period", [1, 5])
+@pytest.mark.parametrize("entry,exit_price", [
+    (10.0, 12.0), (np.nan, 12.0), (10.0, np.nan), (np.nan, np.nan),
+    (0.0, 12.0), (10.0, 0.0), (0.0, 0.0),
+    (-10.0, 12.0), (10.0, -12.0), (-10.0, -12.0),
+])
+def test_log_returns_require_both_future_endpoints_to_be_positive(
+    price_column, period, entry, exit_price,
+):
+    days = pd.bdate_range("2025-01-03", periods=period + 5)
+    for lag in range(1, 4):
+        prices = pd.DataFrame({
+            "time": days, "code": ["A"] * len(days),
+            **{name: np.arange(len(days), dtype=float) + 20 for name in PRICE_COLUMNS},
+        })
+        prices.loc[lag, price_column] = entry
+        prices.loc[lag + period, price_column] = exit_price
+        with np.errstate(all="raise"):
+            frame = evaluate_returns(prices, period=period, max_lag=3, price_column=price_column)
+        label = frame.loc[0, f"P{period}L{lag}"]
+        if entry > 0 and exit_price > 0:
+            assert label == pytest.approx(np.log(exit_price / entry))
+        else:
+            assert pd.isna(label)
+        assert not np.isinf(frame[[f"P{period}L{i}" for i in range(1, 4)]]).any().any()
+
+
+def test_log_holding_label_ignores_invalid_interior_quotes():
+    prices = pd.DataFrame({
+        "time": pd.bdate_range("2025-01-03", periods=7), "code": ["A"] * 7,
+        "open_hfq": [999.0, 10.0, np.nan, 0.0, -20.0, np.nan, 20.0],
+    })
+    frame = evaluate_returns(prices, period=5)
+    assert frame.loc[0, "P5L1"] == pytest.approx(np.log(2))
+    assert frame.loc[1:, "P5L1"].isna().all()
 
 
 @pytest.mark.parametrize("price_column", PRICE_COLUMNS)
@@ -243,15 +293,15 @@ def test_missing_quotes_use_trading_grid_not_calendar_days_or_valid_quote_positi
     for code in ("A", "B"):
         first = frame.loc[(code, days[0])]
         assert pd.isna(first.P1L1)
-        assert first.P1L2 == pytest.approx(17 / 13 - 1)
-        assert first.P1L3 == pytest.approx(19 / 17 - 1)
+        assert first.P1L2 == pytest.approx(np.log(17 / 13))
+        assert first.P1L3 == pytest.approx(np.log(19 / 17))
         assert frame.loc[(code, days[3]), ["P1L1", "P1L2", "P1L3"]].isna().all()
         assert frame.loc[(code, days[4]), ["P1L1", "P1L2", "P1L3"]].isna().all()
     assert len(frame) == 2 * len(days)
-    assert frame.loc[("B", days[1]), "P1L1"] == pytest.approx(34 / 26 - 1)
+    assert frame.loc[("B", days[1]), "P1L1"] == pytest.approx(np.log(34 / 26))
     # Joining a sparse factor panel only after computing returns must not shrink this axis.
     sparse = frame[frame.index.get_level_values("time").isin(days[[0, 2, 4]])]
-    assert sparse.loc[("A", days[0]), "P1L2"] == pytest.approx(17 / 13 - 1)
+    assert sparse.loc[("A", days[0]), "P1L2"] == pytest.approx(np.log(17 / 13))
 
 
 @pytest.mark.parametrize("price_column", PRICE_COLUMNS)
@@ -264,14 +314,16 @@ def test_generated_graph_reads_only_selected_runtime_field_at_strictly_future_of
     assert set(query.source_factors()) == {price_column}
     assert list(derivatives) == ["P5L1", "P5L2", "P5L3"]
     for lag, node in enumerate(derivatives.values(), start=1):
-        assert node["op"] == "binary.sub" and node["fields"]["right"] == 1.0
-        division = node["fields"]["left"]
-        assert division["op"] == "binary.div"
+        assert node["type"] == "DIRECT" and node["op"] == "binary.sub"
         for operand, offset in (("left", lag + 5), ("right", lag)):
-            assert division["fields"][operand] == {
-                "type": "TS", "op": "unary.shift",
-                "fields": {"col": price_column}, "params": {"periods": -offset},
+            assert node["fields"][operand] == {
+                "type": "DIRECT", "op": "unary.log", "params": {},
+                "fields": {"col": {
+                    "type": "TS", "op": "unary.shift",
+                    "fields": {"col": price_column}, "params": {"periods": -offset},
+                }},
             }
+    assert "binary.div" not in json.dumps(derivatives)
     assert "adj_factor" not in json.dumps(derivatives)
     assert "r0o" not in derivatives
 
@@ -318,6 +370,8 @@ def test_turnover_uses_single_holding_period_on_full_calendar_not_sparse_factor_
     assert "dropColumns!" not in setup
     assert "soloPeriodValues = sort(distinct(int(soloPeriods)))" in setup
     assert "soloFactorDates = table(sort(distinct(timestamp(soloCalendar))) as time)" in setup
+    assert "soloOutputGroupReturns = table(sort(distinct(timestamp(soloCalendar))) as time)" in setup
+    assert "soloOutputGroupReturns = select distinct(time) as time from soloFactorProcessed" not in setup
     assert "move(time, soloPeriod) as previous_time" in setup
     assert "soloOutputGroupTurnover = unionAll(soloOutputGroupTurnover, soloPeriodResult)" in setup
     session.run.assert_any_call("soloOutputGroupTurnover")
@@ -486,6 +540,7 @@ def test_standalone_html_embeds_holding_return_specs_without_ipython(monkeypatch
     assert payload["factor_columns"] == ["score"]
     assert payload["return_columns"] == ["P5L1", "P5L2", "P5L3"]
     assert payload["return_specs"] == report.parameters.return_specs
+    assert {spec["kind"] for spec in payload["return_specs"].values()} == {"log"}
     assert {spec["periods"] for spec in payload["return_specs"].values()} == {5}
     assert {spec["price_column"] for spec in payload["return_specs"].values()} == {"open_hfq"}
     assert {spec["turnover_period"] for spec in payload["return_specs"].values()} == {5}

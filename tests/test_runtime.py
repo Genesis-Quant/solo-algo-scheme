@@ -232,6 +232,13 @@ def test_factor_report_form_build_and_run(monkeypatch, settings):
     assert type(params) is FactorAnalysisParams
     assert (params.period, params.price_column, params.max_lag) == (5, "close_hfq", 3)
     assert params.return_columns == ["P5L1", "P5L2", "P5L3"]
+    assert params.return_specs == {
+        f"P5L{lag}": {
+            "kind": "log", "periods": 5, "lag": lag,
+            "price_column": "close_hfq", "turnover_period": 5,
+        }
+        for lag in range(1, 4)
+    }
     assert (params.start, params.end) == (form.start, form.end)
     assert FactorAnalysisParams.model_validate_json(params.model_dump_json()) == params
     assert params.universe == Universe(pool=StockPool.CSI300)

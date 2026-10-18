@@ -61,7 +61,7 @@ def test_analysis_runs_inline_steps_then_downloads_assigned_outputs(analysis_run
         "soloFactorProcessed = soloFactorInput[soloValidMask]",
         "soloOutputExecutionStatistics = select count(*) as source_count",
         "soloOutputInformationCoefficient = select distinct(time) as time",
-        "soloOutputGroupReturns = select distinct(time) as time",
+        "soloOutputGroupReturns = table(sort(distinct(timestamp(soloCalendar))) as time)",
         "soloOutputGroupTurnover = table(",
         "soloOutputGroupTurnover.sortBy!(`factor`periods`time)",
     ]
@@ -138,6 +138,31 @@ def test_inline_statistics_keep_closed_boundaries_and_full_calendar(analysis_run
         "valid", "validWeight", "validReturn", "totalWeight", "ranks", "ranked", "selected",
     }
     assert all(name.startswith("solo") or name in helper_locals for name in assignments)
+
+
+def test_group_returns_keep_calendar_nulls_and_unmodified_log_labels(analysis_run):
+    run, session = analysis_run
+    run()
+    script = session.run.call_args_list[0].args[0]
+    group_start = script.index("soloOutputGroupReturns = ")
+    group_end = script.index("// 换手与秩自相关", group_start)
+    group_script = script[group_start:group_end]
+    assert group_script.startswith(
+        "soloOutputGroupReturns = table(sort(distinct(timestamp(soloCalendar))) as time)",
+    )
+    assert "soloOutputGroupReturns = lj(soloOutputGroupReturns, soloBottomRows, `time)" in group_script
+    assert "soloOutputGroupReturns = lj(soloOutputGroupReturns, soloWeighted, `time)" in group_script
+    assert "soloOutputGroupReturns = lj(soloOutputGroupReturns, soloTopRows, `time)" in group_script
+    assert "sqlCol(`circ_mv), sqlCol(soloRetSym)" in group_script
+    assert not re.search(
+        r"\b(?:nullFill|mavg|msum|moving|cumprod|cumsum|exp|expm1)\s*\(",
+        group_script,
+    )
+    assert "soloPeriods" not in re.sub(r"//[^\n]*", "", group_script)
+    ic_script = script[script.index("soloOutputInformationCoefficient = "):group_start]
+    assert "corr, sqlCol(soloFactorSym), sqlCol(soloRetSym)" in ic_script
+    assert "spearmanr, sqlCol(soloFactorSym), sqlCol(soloRetSym)" in ic_script
+    assert not re.search(r"\b(?:mavg|msum|moving)\s*\(", ic_script)
 
 
 def test_analysis_does_not_load_resources_or_read_detached_dos(monkeypatch, analysis_run):
