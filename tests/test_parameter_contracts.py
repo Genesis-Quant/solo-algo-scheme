@@ -253,20 +253,20 @@ def test_factor_form_defaults_match_web_research_settings():
     initial = defaults(FactorReportForm)
     assert initial == {
         "start": "2020-01-01", "end": "2027-01-01", "pool": StockPool.CSI300,
-        "max_lag": 1, "groups": 5,
+        "period": 1, "price_column": "open_hfq", "max_lag": 1, "groups": 5,
         "n_select": 10, "weight": "market_value", "calendar_symbol": "000300.XSHG",
     }
     assert FactorReportForm.model_fields["columns"].is_required()
     built = FactorReportForm(columns=["momentum"]).build()
-    assert built.max_lag == 1
-    assert built.return_columns == ["r0o", "r1"]
+    assert (built.period, built.price_column, built.max_lag) == (1, "open_hfq", 1)
+    assert built.return_columns == ["P1L1"]
     assert built.groups == 5
     assert built.n_select == 10
     assert built.weight == "market_value"
     assert built.calendar_symbol == "000300.XSHG"
     first = built.return_columns
-    first.append("r2")
-    assert built.return_columns == ["r0o", "r1"]
+    first.append("P1L2")
+    assert built.return_columns == ["P1L1"]
     assert FactorReportForm(columns=["momentum"]).max_lag == 1
 
 
@@ -291,8 +291,8 @@ def test_form_cross_field_dates_are_validated_by_build_not_constructor(
     "updates,message",
     [
         ({"columns": ["f", "f"]}, "因子列不能重复"),
-        ({"columns": ["r1"]}, "分析保留列重名"),
-        ({"columns": ["r1o"], "max_lag": 2}, "分析保留列重名"),
+        ({"columns": ["P1L1"]}, "分析保留列重名"),
+        ({"columns": ["P5L3"], "period": 5, "max_lag": 3}, "分析保留列重名"),
     ],
 )
 def test_factor_form_analysis_cross_field_validation_is_deferred(updates, message):
@@ -428,6 +428,42 @@ def test_custom_required_fields_and_build_validation(form_type, field):
     pending = form_type.model_validate({**DATES, field: 0})
     with pytest.raises(ValidationError, match=field):
         pending.build()
+
+
+def test_factor_algorithm_periods_are_independent_from_analysis_holding_period(monkeypatch):
+    class RuntimeParams(FactorParams):
+        periods: int = Field(default=20, ge=1)
+
+    class Analysis(RuntimeParams, FactorAnalysisParams):
+        pass
+
+    class PeriodFactor(Factor[RuntimeParams]):
+        def compute(self, start, end):
+            raise AssertionError("projection tests must not compute or query")
+
+    form = FactorReportForm[Analysis](
+        **DATES, columns=["momentum"], periods=20, period=5,
+        price_column="open_hfq", max_lag=3,
+    )
+    params = form.build()
+    assert (params.periods, params.period, params.max_lag) == (20, 5, 3)
+    assert params.return_columns == ["P5L1", "P5L2", "P5L3"]
+    assert Analysis.model_validate_json(params.model_dump_json()) == params
+    runtime = project_parameters(RuntimeParams, params)
+    assert runtime.model_dump() == {"universe": params.universe.model_dump(), "periods": 20}
+    assert not {"period", "price_column", "max_lag"} & RuntimeParams.model_fields.keys()
+
+    report = FactorAnalysisResult(
+        **{name: pd.DataFrame() for name in FactorAnalysisResult.filenames},
+    )
+    analyze = Mock(return_value=report)
+    monkeypatch.setattr("scheme.execute.factor.api.analyze_factors", analyze)
+    params.run(PeriodFactor)
+    factor, analysis = analyze.call_args.args
+    assert type(factor.params) is RuntimeParams
+    assert factor.params.periods == 20
+    assert factor.params.model_dump() == runtime.model_dump()
+    assert analysis is params
 
 
 def test_factor_run_revalidates_missing_or_invalid_concrete_runtime(monkeypatch):

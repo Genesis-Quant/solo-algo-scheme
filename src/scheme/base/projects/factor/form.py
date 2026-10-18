@@ -20,6 +20,10 @@ class FactorReportForm(ResearchForm[P], Generic[P]):
 
     end: date = Field(default=date(2027, 1, 1), title="结束日期（含）")
     columns: list[str] = Field(min_length=1, title="因子列")
+    period: int = Field(default=1, ge=1, strict=True, title="持有期（交易日）")
+    price_column: Literal["open", "close", "open_hfq", "close_hfq"] = Field(
+        default="open_hfq", title="收益价格字段",
+    )
     max_lag: int = Field(default=1, ge=1, strict=True, title="最大滞后阶数（交易日）")
     groups: int = Field(default=5, ge=2, title="分组数量")
     n_select: int = Field(default=10, ge=1, title="极端股票数")

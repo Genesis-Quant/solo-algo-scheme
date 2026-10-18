@@ -33,6 +33,10 @@ class FactorAnalysisParams(FactorParams):
     start: date = Field(title="开始日期")
     end: date = Field(title="结束日期（含）")
     columns: list[str] = Field(min_length=1, title="因子列")
+    period: int = Field(default=1, ge=1, strict=True, title="持有期（交易日）")
+    price_column: Literal["open", "close", "open_hfq", "close_hfq"] = Field(
+        default="open_hfq", title="收益价格字段",
+    )
     max_lag: int = Field(default=1, ge=1, strict=True, title="最大滞后阶数（交易日）")
     groups: int = Field(default=5, ge=2, title="分组数量")
     n_select: int = Field(default=10, ge=1, title="极端股票数")
@@ -63,20 +67,17 @@ class FactorAnalysisParams(FactorParams):
 
     @property
     def return_columns(self) -> list[str]:
-        return [name for lag in range(1, self.max_lag + 1) for name in (f"r{lag - 1}o", f"r{lag}")]
+        return [f"P{self.period}L{lag}" for lag in range(1, self.max_lag + 1)]
 
     @property
     def return_specs(self) -> dict[str, dict[str, str | int]]:
-        specs = {}
-        for lag in range(1, self.max_lag + 1):
-            for name, offset, session in (
-                (f"r{lag - 1}o", lag - 1, "overnight"), (f"r{lag}", lag, "intraday"),
-            ):
-                specs[name] = {
-                    "kind": "simple", "periods": 1, "lag": offset,
-                    "session": session, "turnover_period": lag,
-                }
-        return specs
+        return {
+            name: {
+                "kind": "simple", "periods": self.period, "lag": lag,
+                "price_column": self.price_column, "turnover_period": self.period,
+            }
+            for lag, name in enumerate(self.return_columns, start=1)
+        }
 
     def run(
         self, factor: "type[Factor[P]]", *, settings: "DolphinSettings | None" = None

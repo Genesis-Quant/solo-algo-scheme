@@ -48,7 +48,7 @@ scheme/
 参数按三层职责组织：
 
 - `FactorParams` 只提供 `universe`，项目子类声明算法字段，不携带 `start/end`。`StrategyParams` 仍包含 `start`、`end`、`universe`；四类 Algo 的 Params 从统一策略参数提取自身算法字段，不携带回测配置。
-- `FactorAnalysisParams(FactorParams)` 声明 `start`、`end` 和 `columns`、`max_lag` 等分析选项，日期由分析器直接传给 `Factor.compute(start,end)`。`StrategyAnalysisParams(StrategyParams)` 增加行情、基准和回测引擎设置；都实现 `run` 并返回报告。各环节的 `Model/Optimize/Control/ExecutionAnalysisParams` 直接继承对应的 Algo Params，增加独立研究所需的日期、股票池、回测设置和上游选择。
+- `FactorAnalysisParams(FactorParams)` 声明 `start`、`end` 和 `columns`、`period`、`price_column`、`max_lag` 等分析选项，日期由分析器直接传给 `Factor.compute(start,end)`。`StrategyAnalysisParams(StrategyParams)` 增加行情、基准和回测引擎设置；都实现 `run` 并返回报告。各环节的 `Model/Optimize/Control/ExecutionAnalysisParams` 直接继承对应的 Algo Params，增加独立研究所需的日期、股票池、回测设置和上游选择。
 - 五类公共 Form 由 Scheme 提供，项目只绑定自己的 AnalysisParams。`start/end/pool` 统一定义；四类策略环节还共享行情、基准、资金和费率。Scheme 负责 `pool → Universe`、资金费率 → `config` 以及 `build()`，不执行研究。
 
 项目自定义 AnalysisParams 同时继承本项目的具体 Params 与对应 Scheme AnalysisParams；算法字段只在 Params 声明一次。公共 Form 会自动读取具体 AnalysisParams 的字段、默认值、约束和 JSON Schema 元数据，`build()` 返回该具体类型，并执行它的字段及跨字段校验。运行时根据 Factor/Algo 的参数泛型构造新的具体 Params，只传算法声明的字段，不把分析字段泄漏给算法。
@@ -152,6 +152,15 @@ logger.info("训练完成：%d 个样本", count)
 ```
 
 独立研究进程没有配置标准库日志时，研究包（`factor`、`model_1a2b` 等平台包名及其子模块）、Notebook（`__main__`）、`backtest` 和 `scheme` 的标准库日志按所选级别输出；其他第三方库只输出 WARNING 及以上。宿主已配置标准库日志时，保留已有处理器和 root 级别，日志继续由宿主处理，不替换或关闭其日志文件。Scheme 自身日志的格式和级别设置仍然生效。
+
+### 1.8.0 未来持有收益、内联 DOS 与统一报告筛选
+
+- 因子分析新增 `period`（默认1）和 `price_column`（默认 `open_hfq`，可选 `open/close/open_hfq/close_hfq`）；`max_lag` 生成从t+1开始的入场延迟。`P5L1/P5L2/P5L3` 分别是t+1→t+6、t+2→t+7、t+3→t+8的5交易日simple收益，不再生成因子当日收盘起算的隔夜标签。缺价和末端不足保留NULL，不延长评价结束日。
+- 新增 `Factor.preprocess`，在return前对DataFrame或显式session中的DosVar做DOS去极值、标准化、动态行业/log流通市值中性化及残差再标准化，统一返回 `(date,symbol)` 因子面板。Factor模板已默认调用，原查询同时输出 `industry_l0/circ_mv`。
+- Solo下发脚本仅保留 `use query`；因子统计、预处理和公开数据回测入口的辅助函数内联在会话中，不依赖factor/backtest脚本模块；官方 `Backtest::` 插件接口不变，query服务自身的内部依赖仍由查询服务维护。
+- 报告日期条下新增因子、收益率、IC类型三个全局选择框，统一驱动卡片，切维度保留日期且复用Parquet；衰减保留多收益横轴并突出当前选择。多期重叠收益不生成误导性的净值或年化指标；独立HTML资源同步构建。
+
+这是不兼容的分析接口调整。Scheme与五类Algo模板统一发布v1.8.0，模板声明 `scheme>=1.8.0,<1.9.0`。现有项目、冻结环境和历史报告不自动升级或重算；前端与Jupyter报告桥接需使用配套提交。
 
 ### 1.7.0 因子闭区间与保存前抽样校验
 
@@ -316,7 +325,7 @@ from scheme.data import ts_api, pro
 `scheme.data` 导出 DolphinDB 的 Arena `query`、`backtest`，以及 Tushare SDK `ts_api` 和 Pro 客户端 `pro`，
 导入前配置 `TUSHARE_TOKEN`；不会在导入时发起数据请求。未使用 Tushare 时无需配置其 token。
 
-`query`、`backtest` 分别直接导出 Arena 的 `execute_query`、`run_backtest`，参数和结果保持 Arena 原样。
+`query` 直接导出 Arena 的 `execute_query`；`backtest` 保留 Arena `run_backtest` 的参数和结果契约，但由 Scheme 包装会话，将回测辅助 DOS 内联，不加载 factor/backtest 模块。用户 utils/callbacks 只允许 `use query`，既有 `backtest::` 辅助函数引用转为会话内函数；大写 `Backtest::` 插件接口保持不变。
 它们返回的结果支持 `with`：退出时关闭查询连接，回测还会销毁其引擎；传入的 session 也由结果关闭。
 需要保留的 DataFrame 在 `with` 内读取。Arena DSL 类型从 `runtime.apps.query` 导入。
 
@@ -337,7 +346,7 @@ with backtest(request, callbacks, config={"cash": 100000}) as result:
 ```
 
 这两个 Arena 入口沿用闭区间 `[start_date, end_date]`，结果使用 `time/code` 列与 `.SH/.SZ` 证券代码，
-并使用已部署的 Arena DolphinDB `query/common/backtest` 模块。Solo 因子计算和分析采用 `[start, end]`；策略回测及共享 `Universe.query/evaluate` 仍采用 `[start, end)`。因子实现调用共享 Universe 时，应传 `end + timedelta(days=1)` 以包含结束日。
+Solo 提交的脚本仅保留 `use query`，分析统计、预处理及回测辅助函数均在会话内定义，不部署或加载 factor/backtest/common/ta 模块。query 服务自身的模块依赖仍由查询服务维护，不在此处重复内联。Solo 因子计算和分析采用 `[start, end]`；策略回测及共享 `Universe.query/evaluate` 仍采用 `[start, end)`。因子实现调用共享 Universe 时，应传 `end + timedelta(days=1)` 以包含结束日。
 Arena 的 `backtest` 会通过 Tushare 读取股票元数据，因此还需配置 `TUSHARE_TOKEN`。
 
 ```python
@@ -347,7 +356,7 @@ from scheme.execute.strategy import StrategyAnalysisParams, run_backtest
 
 form = FactorReportForm(
     start="2025-01-01", end="2026-01-01", columns=["momentum"],
-    pool=StockPool.CSI300, max_lag=2,
+    pool=StockPool.CSI300, period=5, price_column="open_hfq", max_lag=3,
 )
 params = form.build()
 report = params.run(Factor)  # 传入项目的 Factor 类，自动构造 FactorParams。
@@ -391,20 +400,39 @@ snapshot 模式接收 Arena StockSnapshot 的 Market、SecurityID、TradeDate、
 可通过 `DOLPHIN_SNAPSHOT_DATABASE`、`DOLPHIN_SNAPSHOT_TABLE` 指定同结构表。
 其他原始格式需继承 ResearchBacktest 实现 load_messages。
 
-因子检验通过 `max_lag` 输入最大滞后阶数（严格正整数，默认 1），生成 `2N` 个按时间顺序排列的隔夜与日内收益字段。所有字段与 t 日因子配对；最大滞后 N 涉及 t 至 t+N，共 N+1 个交易日的行情，不是累计持有收益。N=2 时：
+### 因子返回前的 DOS 预处理
 
-| 字段 | 时段 | 简单收益公式 |
+`Factor.preprocess` 接收 `time/code/具名因子列` DataFrame、`(date,symbol)` 索引面板，或所属 session 中的 `DosVar`。返回统一为排序且唯一的 `(date,symbol)` DataFrame，仅含所选因子，可直接从 `compute` 返回：
+
+```python
+# 已在Python计算因子，且frame有time/code/momentum列。
+return self.preprocess(frame, columns=["momentum"])
+
+# 在原查询的with中计算，避免先下载整张原始因子表。
+return self.preprocess(
+    DosVar(result.data_ref), session=result.session, columns=["momentum"],
+)
+```
+
+`DosVar` 只是变量名，必须显式传 session。借用的 session 不会被关闭，原输入表和查询缓存不会被改写；helper 用私有临时变量并在结束后清理。缺少暴露列时只按输入日期、证券补查；建议原查询显式输出 `industry_l0`、`circ_mv`，避免额外查询。
+
+默认按每个日期、每个因子执行 `median ± 3×MAD` 去极值、总体标准差 `stdp` 标准化，以标准化log市值和行业哑变量做含截距SVD OLS，残差再标准化。市值小于1截为1；退化截面、零方差和缺失暴露留NULL，保留原行，不自动添加分组。空表或所选因子全部NULL明确报错。默认暴露为动态 `industry_l0` 与 `circ_mv`，不使用旧应用的静态Tushare行业映射。也可通过 `industry_column`、`market_value_column` 选择输入中的其他暴露列。处理逻辑来自原factor实现，但以会话DOS定义运行，不加载factor模块；正式分析不重复执行预处理。
+
+### 因子收益标签
+
+因子检验使用 `period`（收益持有期，默认1）、`price_column`（价格字段，默认 `open_hfq`）和 `max_lag`（入场延迟上限，默认1）。两个整数均要求严格正整数；价格字段可选 `open`、`close`、`open_hfq`、`close_hfq`。对 `k=1..max_lag` 生成 `P{period}L{k}`，公式为 `price_column(t+k+period)/price_column(t+k)-1`。起点最早为因子日的下一个交易日，不再允许因子当日收盘价起算隔日收益。`period=5, price_column="open_hfq", max_lag=3` 时：
+
+| 字段 | 后复权开盘价区间 | 简单收益公式 |
 | --- | --- | --- |
-| `r0o` | t 收盘 → t+1 开盘 | `O(t+1) / C(t) - 1` |
-| `r1` | t+1 开盘 → t+1 收盘 | `C(t+1) / O(t+1) - 1` |
-| `r1o` | t+1 收盘 → t+2 开盘 | `O(t+2) / C(t+1) - 1` |
-| `r2` | t+2 开盘 → t+2 收盘 | `C(t+2) / O(t+2) - 1` |
+| `P5L1` | t+1 → t+6 | `open_hfq(t+6) / open_hfq(t+1) - 1` |
+| `P5L2` | t+2 → t+7 | `open_hfq(t+7) / open_hfq(t+2) - 1` |
+| `P5L3` | t+3 → t+8 | `open_hfq(t+8) / open_hfq(t+3) - 1` |
 
-O、C 分别为 `open * adj_factor`、`close * adj_factor`；收益通过 Arena query DSL 在 DolphinDB 中按完整查询交易日轴计算，不能在已筛选或稀疏的因子面板上位移，也不能跳过缺行情寻找下一条非空价格。`o` 表示隔夜段。
-Factor 面板上传后，在同一 DolphinDB 会话内拼接收益率、过滤因子空值、生成分组并调用 Arena factor 模块计算报告；不重复处理 Factor 的预处理。默认等权，market_value 使用 circ_mv；只生成分组标签，不修改因子值。
-因子评价行情只读取 `[start,end]`，包含结束日但不读取之后的价格，最大滞后不会扩展查询结束日；不足未来 k 个交易日时，`r{k-1}o` 与 `r{k}` 为 NULL，不填零。收盘缺失可能只影响日内段，不能因为某个标签为空就删除其它可评价标签；这些行仍保留因子、分组及换手。
-报告为每段收益记录 `kind=simple, periods=1`，另标明 lag 和 overnight/intraday；不能将字段中的阶数当成持有期。换手独立比较因子分组在 1..N 个交易日间隔下的变化，不等同实际成交换手。
-旧 `return_periods` 不会被自动解释成新滞后参数，旧保存报告由原有收益规格解释，不改写历史文件。评价交易日轴由 calendar_symbol（默认沪深300）行情确定，缺少基准数据报错。
+直接读取所选价格字段，后复权字段不再乘 `adj_factor`。收益通过 Arena query DSL 在 DolphinDB 中按完整查询交易日轴计算，不能在已筛选或稀疏的因子面板上位移，也不能跳过缺行情寻找下一条非空价格。所有标签与 t 日因子配对，收益是 simple 而非 log。
+Factor 面板上传后，在同一 DolphinDB 会话内拼接收益率、过滤因子空值、生成分组并调用内联统计函数计算报告；不再 `use factor`，也不重复处理 Factor 的预处理。默认等权，market_value 使用 circ_mv；只生成分组标签，不修改因子值。
+因子评价行情只读取 `[start,end]`，包含结束日但不读取之后的价格；持有期和滞后都不会扩展查询结束日。未来入场或退出端点缺价时对应列为 NULL，较早的 lag 仍可能有效，不填零、不因某个标签为空删除其它可评价标签；这些行仍保留因子、分组及换手。默认 `P1L1` 需要 t+1 和 t+2 两个未来报价。
+报告记录 `kind=simple, periods=period, lag=k, price_column=所选字段, turnover_period=period`，不把入场延迟当作持有期。换手独立比较因子分组在 period 个完整交易日间隔下的变化，不等同实际成交换手；`period>1` 的逐日收益相互重叠，不能直接连乘冒充可交易净值。
+旧报告中的 `r0o/r1/r1o/r2` 与 `return_N` 保持原收益规格，不自动解释成新参数、不改写历史文件。评价交易日轴由 calendar_symbol（默认沪深300）行情确定，缺少基准数据报错。
 未来收益只进入评价，不能传给 Model。默认风险平价缺少历史样本或求解失败时退化等权并记录原因。
 
 策略回测驱动初始化正序，每次事件先逆序触发回调，再正序调用各环节 process，重复直到没有可消费的消息。Context 变化不伪造事件回调。

@@ -299,12 +299,12 @@ def query_prices(prices: pd.DataFrame):
 def test_real_factor_statistics(monkeypatch, tmp_path, weight):
     prices = pd.DataFrame(
         {
-            "time": np.repeat(pd.to_datetime(["2025-01-02", "2025-01-03", "2025-01-06"]), 2),
-            "code": ["000001.SZ", "600000.SH"] * 3,
-            "open": [9.0, 9.0, 5.5, 12.0, 7.5, 15.4],
-            "close": [10.0, 10.0, 6.0, 14.0, 8.25, 18.2],
-            "adj_factor": [1.0, 1.0, 2.0, 1.0, 2.0, 1.0],
-            "circ_mv": [1.0, 3.0] * 3,
+            "time": np.repeat(pd.to_datetime([
+                "2025-01-02", "2025-01-03", "2025-01-06", "2025-01-07",
+            ]), 2),
+            "code": ["000001.SZ", "600000.SH"] * 4,
+            "open_hfq": [9.0, 9.0, 11.0, 12.0, 15.0, 15.4, 18.0, 20.0],
+            "circ_mv": [1.0, 3.0] * 4,
         }
     )
     monkeypatch.setattr("scheme.execute.factor.api.query", query_prices(prices))
@@ -321,16 +321,16 @@ def test_real_factor_statistics(monkeypatch, tmp_path, weight):
             weight=weight,
         ),
     )
-    assert result.information_coefficient.score_r0o_ic.tolist() == pytest.approx([1.0, 1.0])
-    assert result.group_returns.score_r0o_group0.tolist() == pytest.approx([0.1, 0.1])
+    assert result.information_coefficient.score_P1L1_ic.tolist() == pytest.approx([-1.0, -1.0])
+    assert result.group_returns.score_P1L1_group0.tolist() == pytest.approx([15 / 11 - 1, 20 / 15.4 - 1])
     assert result.processed_data.score.tolist() == [1.0, 2.0, 2.0, 1.0]
     assert result.processed_data.score_group.tolist() == [0, 1, 1, 0]
-    assert result.processed_data.r0o.tolist() == pytest.approx([0.1, 0.2, 0.25, 0.1])
-    assert result.processed_data.r1.tolist() == pytest.approx([12 / 11 - 1, 14 / 12 - 1, 0.1, 18.2 / 15.4 - 1])
-    assert result.processed_data.r1o.iloc[:2].tolist() == pytest.approx([0.25, 0.1])
-    assert result.processed_data.r2.iloc[:2].tolist() == pytest.approx([0.1, 18.2 / 15.4 - 1])
-    assert result.processed_data[["r1o", "r2"]].iloc[2:].isna().all().all()
-    assert set(result.group_turnover.periods) == {1, 2}
+    assert result.processed_data.P1L1.tolist() == pytest.approx([
+        15 / 11 - 1, 15.4 / 12 - 1, 18 / 15 - 1, 20 / 15.4 - 1,
+    ])
+    assert result.processed_data.P1L2.iloc[:2].tolist() == pytest.approx([18 / 15 - 1, 20 / 15.4 - 1])
+    assert result.processed_data.P1L2.iloc[2:].isna().all()
+    assert set(result.group_turnover.periods) == {1}
     assert result.execution_statistics.source_count.tolist() == [2, 2]
     assert result.execution_statistics.filtered_count.tolist() == [2, 2]
     assert result.processed_data.circ_mv.tolist() == (
@@ -346,9 +346,7 @@ def test_real_market_weight_checks_only_valid_factor_rows(monkeypatch, missing_c
         {
             "time": np.repeat(pd.date_range("2025-01-02", periods=3), 3),
             "code": ["000001.SZ", "000002.SZ", "600000.SH"] * 3,
-            "open": [9.0, 8.0, 9.0, 5.0, 8.0, 11.0, 6.0, 8.0, 12.0],
-            "close": [10.0, 8.0, 10.0, 5.5, 8.0, 12.0, 6.6, 8.0, 13.2],
-            "adj_factor": [1.0, 1.0, 1.0, 2.0, 1.0, 1.0, 2.0, 1.0, 1.0],
+            "open_hfq": [9.0, 8.0, 9.0, 10.0, 8.0, 11.0, 12.0, 8.0, 12.0],
             "circ_mv": [1.0, 2.0, 3.0] * 3,
         }
     )
@@ -391,21 +389,17 @@ def test_real_factor_query_pipeline():
     frame = result.processed_data
     assert frame.score.tolist() == [1.0, 2.0, 2.0, 1.0]
     assert frame.score_group.tolist() == [0, 1, 1, 0]
-    first = frame.time == frame.time.min()
-    assert frame.loc[first, ["r0o", "r1"]].notna().all().all()
-    assert frame.loc[~first, ["r0o", "r1"]].isna().all().all()
-    assert frame[["r1o", "r2"]].isna().all().all()
+    assert frame[["P1L1", "P1L2"]].isna().all().all()
+    assert "r0o" not in frame.columns
     assert result.execution_statistics.retention_rate.tolist() == [1.0, 1.0]
 
 
-def test_real_segment_returns_keep_missing_prices_sparse_factor_dates_and_end_boundary(monkeypatch):
+def test_real_holding_returns_keep_missing_prices_sparse_factor_dates_and_end_boundary(monkeypatch):
     days = pd.to_datetime(["2025-01-03", "2025-01-06", "2025-01-07", "2025-01-08", "2025-01-09"])
     prices = pd.DataFrame({
         "time": np.repeat(days, 2),
         "code": ["000001.SZ", "600000.SH"] * 5,
-        "open": [9.0, 18.0, np.nan, 22.0, 6.0, 13.0, 7.5, 16.5, 999.0, 999.0],
-        "close": [10.0, 20.0, np.nan, 24.0, 7.0, 15.0, 8.25, 18.0, 1000.0, 1000.0],
-        "adj_factor": [1.0] * 4 + [2.0] * 6,
+        "open_hfq": [9.0, 18.0, np.nan, 22.0, 12.0, 26.0, 15.0, 33.0, 999.0, 999.0],
     })
 
     class SparseDates(Factor[FactorParams]):
@@ -425,20 +419,14 @@ def test_real_segment_returns_keep_missing_prices_sparse_factor_dates_and_end_bo
     frame = result.processed_data.set_index(["code", "time"])
     assert len(frame) == 6
     first = frame.loc[("000001.XSHE", days[0])]
-    assert first[["r0o", "r1", "r1o"]].isna().all()
-    assert first.r2 == pytest.approx(14 / 12 - 1)
+    assert pd.isna(first.P1L1)
+    assert first.P1L2 == pytest.approx(15 / 12 - 1)
     other = frame.loc[("600000.XSHG", days[0])]
-    assert other[params.return_columns].tolist() == pytest.approx([
-        22 / 20 - 1, 24 / 22 - 1, 26 / 24 - 1, 30 / 26 - 1,
-    ])
+    assert other[params.return_columns].tolist() == pytest.approx([26 / 22 - 1, 33 / 26 - 1])
     for code in ("000001.XSHE", "600000.XSHG"):
-        penultimate = frame.loc[(code, days[2])]
-        assert penultimate[["r0o", "r1"]].notna().all()
-        assert penultimate[["r1o", "r2"]].isna().all()
+        assert frame.loc[(code, days[2]), params.return_columns].isna().all()
         assert frame.loc[(code, days[3]), params.return_columns].isna().all()
-    assert frame.loc[("000001.XSHE", days[2]), "r0o"] == pytest.approx(15 / 14 - 1)
-    assert frame.loc[("000001.XSHE", days[2]), "r1"] == pytest.approx(0.1)
-    assert set(result.group_turnover.periods) == {1, 2}
+    assert set(result.group_turnover.periods) == {1}
 
 
 @pytest.mark.parametrize("pool,weight,size", [

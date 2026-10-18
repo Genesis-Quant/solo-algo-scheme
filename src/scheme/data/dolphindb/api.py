@@ -1,6 +1,7 @@
-"""直接导出 Arena 查询和回测接口，结果支持 with。"""
+"""导出 Arena 查询与会话内联回测接口，结果支持 with。"""
 
-from runtime.apps.backtest import run_backtest as backtest
 from runtime.apps.query import execute_query as query
+
+from .backtest import backtest
 
 __all__ = ["query", "backtest"]

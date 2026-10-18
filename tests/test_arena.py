@@ -10,11 +10,13 @@ from runtime.apps.backtest.schema import CALLBACK_PARAMETER_COUNTS
 from runtime.apps.query import execute_query
 
 from scheme.data import backtest, query
+from scheme.data.dolphindb.backtest import backtest as inline_backtest
 
 
-def test_exports_are_arena_functions():
+def test_query_is_arena_function_and_backtest_uses_inline_wrapper():
     assert query is execute_query
-    assert backtest is run_backtest
+    assert backtest is inline_backtest
+    assert backtest is not run_backtest
 
 
 @pytest.mark.skipif(os.getenv("SOLO_TEST_DOLPHIN") != "1", reason="需要 DolphinDB")

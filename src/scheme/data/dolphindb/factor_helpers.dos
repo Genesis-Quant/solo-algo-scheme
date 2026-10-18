@@ -1,0 +1,96 @@
+def soloFactorStringVector(cols) {
+    if (typestr(cols) == "STRING") {
+        return [string(cols)]
+    }
+    return string(cols)
+}
+
+def soloFactorCheckColumns(tb, requiredColumns) {
+    columns = tb.columnNames()
+    for (col in requiredColumns) {
+        if (not(col in columns)) {
+            throw "required column is missing: " + string(col)
+        }
+    }
+}
+
+def soloFactorWeightedReturn(weight, ret) {
+    if (any(!isNull(weight) && weight < 0)) {
+        throw "市值权重不能为负数"
+    }
+    valid = !isNull(weight) && !isNull(ret)
+    validWeight = weight[valid]
+    validReturn = ret[valid]
+    totalWeight = sum(validWeight)
+    if (!isValid(totalWeight) || totalWeight <= 0) {
+        return double(NULL)
+    }
+    return sum(validWeight * validReturn) \ totalWeight
+}
+
+def soloFactorExtremeRanks(values, codes, ascending) {
+    ranks = take(long(NULL), size(values))
+    if (size(values) == 0) return ranks
+    ranked = table(
+        long(0 .. (size(values) - 1)) as row_id,
+        double(values) as factor_value,
+        string(codes) as factor_code
+    )
+    ranked = select * from ranked where !isNull(factor_value)
+    ranked.sortBy!(`factor_value`factor_code, [ascending, ascending])
+    if (ranked.rows() > 0) {
+        ranks[ranked.row_id] = long(0 .. (ranked.rows() - 1))
+    }
+    return ranks
+}
+
+def soloFactorExtremeWeightedReturn(
+    factorValue,
+    weight,
+    ret,
+    nSelect,
+    ascending,
+    codes) {
+    selected = !isNull(factorValue) && (
+        soloFactorExtremeRanks(factorValue, codes, ascending) < int(nSelect)
+    )
+    return soloFactorWeightedReturn(weight[selected], ret[selected])
+}
+
+def soloFactorValidateGroups(tb, factorCols, nGroups, timeCol="time", codeCol="code") {
+    for (factorCol in soloFactorStringVector(factorCols)) {
+        groupCol = string(factorCol) + "_group"
+        soloFactorCheckColumns(tb, symbol([factorCol, groupCol, timeCol, codeCol]))
+        groups = double(tb[groupCol])
+        invalid = !isNull(tb[factorCol]) && (
+            isNull(groups) || groups < 0 || groups >= nGroups || groups != floor(groups)
+        )
+        if (any(invalid)) {
+            sample = tb[invalid]
+            sample = sample[0:min(5, sample.rows())]
+            throw groupCol + " 必须是 [0, " + string(nGroups - 1) +
+                "] 内的整数；违规行数=" + string(sum(invalid)) +
+                "，日期=" + string(sample[timeCol]) + ", code=" + string(sample[codeCol])
+        }
+    }
+}
+
+def soloFactorZScore(values) {
+    valueStd = stdp(values)
+    if (!isValid(valueStd) || valueStd == 0) {
+        return take(double(NULL), size(values))
+    }
+    return (values - avg(values)) \ valueStd
+}
+
+def soloFactorClipMad(values) {
+    valueMedian = median(values)
+    mad = median(abs(values - valueMedian))
+    if (!isValid(mad) || mad == 0) {
+        return values
+    }
+    return values.clip(
+        valueMedian - 3 * mad,
+        valueMedian + 3 * mad
+    )
+}

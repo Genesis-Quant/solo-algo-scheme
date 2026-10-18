@@ -158,7 +158,9 @@ def test_factor_panel_converts_numeric_values_without_coercing_invalid_input():
 
 
 @pytest.mark.parametrize("max_lag", [1, 2, 5])
-def test_factor_returns_are_read_only_until_end(monkeypatch, settings, max_lag):
+@pytest.mark.parametrize("period", [1, 5])
+@pytest.mark.parametrize("price_column", ["open", "close", "open_hfq", "close_hfq"])
+def test_factor_returns_are_read_only_until_end(monkeypatch, settings, max_lag, period, price_column):
     requests = []
 
     class Stop(Exception):
@@ -170,15 +172,17 @@ def test_factor_returns_are_read_only_until_end(monkeypatch, settings, max_lag):
 
     monkeypatch.setattr("scheme.execute.factor.api.query", capture)
     monkeypatch.setattr("scheme.execute.factor.api.create_session", lambda _: nullcontext(object()))
-    params = FactorAnalysisParams(**DATES, columns=["f"], max_lag=max_lag)
+    params = FactorAnalysisParams(
+        **DATES, columns=["f"], period=period, max_lag=max_lag, price_column=price_column,
+    )
     with pytest.raises(Stop):
         analyze_factors(ExampleFactor(FactorParams()), params, settings=settings)
     assert (requests[0]["start_date"], requests[0]["end_date"]) == ("2025-01-01", "2025-01-03")
-    assert list(requests[0]["derivatives"]) == ["adjusted_open", "adjusted_close", *params.return_columns]
+    assert list(requests[0]["derivatives"]) == params.return_columns
     from runtime.apps.query import FactorQuery
 
     validated = FactorQuery.model_validate(requests[0])
-    assert set(validated.source_factors()) == {"open", "close", "adj_factor"}
+    assert set(validated.source_factors()) == {price_column}
 
 
 @pytest.mark.parametrize("start", ["2025-01-01", "2025-01-03"])
@@ -214,11 +218,14 @@ def test_factor_analysis_keeps_closed_end_in_source_query_and_statistics(monkeyp
 
 def test_factor_report_form_build_and_run(monkeypatch, settings):
     form = FactorReportForm(
-        **DATES, columns=["f"], pool=StockPool.CSI300, groups=3, max_lag=2,
+        **DATES, columns=["f"], pool=StockPool.CSI300, groups=3,
+        period=5, price_column="close_hfq", max_lag=3,
     )
     params = form.build()
     assert_type(params, FactorAnalysisParams)
     assert type(params) is FactorAnalysisParams
+    assert (params.period, params.price_column, params.max_lag) == (5, "close_hfq", 3)
+    assert params.return_columns == ["P5L1", "P5L2", "P5L3"]
     assert (params.start, params.end) == (form.start, form.end)
     assert FactorAnalysisParams.model_validate_json(params.model_dump_json()) == params
     assert params.universe == Universe(pool=StockPool.CSI300)

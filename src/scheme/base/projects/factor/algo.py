@@ -1,13 +1,17 @@
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from datetime import date
 from random import sample
 from typing import Generic, TypeVar
 
 import pandas as pd
+from backtest import DosVar
 
+from scheme.config import DolphinSettings
 from scheme.log import get_logger
 
 from .params import FactorParams
+from .preprocess import preprocess
 
 __all__ = ["Factor"]
 
@@ -56,6 +60,28 @@ class Factor(ABC, Generic[P]):
         去极值、标准化、中性化等处理由因子实现包含在返回结果中。
         """
         ...
+
+    def preprocess(
+        self,
+        data: pd.DataFrame | DosVar,
+        *,
+        session=None,
+        columns: Sequence[str] | None = None,
+        market_value_column: str = "circ_mv",
+        industry_column: str = "industry_l0",
+        settings: DolphinSettings | None = None,
+    ) -> pd.DataFrame:
+        """在 compute 返回前调用 DOS 去极值、标准化和市值/动态行业中性化。
+
+        接受 time/code 普通列或 (date, symbol) 面板；DosVar 必须显式传 session。
+        缺失暴露仅按输入日期和证券补查；已有暴露原样使用。无效或退化记录保留
+        为 NULL，不生成分组；返回唯一、排序的 (date, symbol) 数值因子面板。
+        """
+        return preprocess(
+            data, session=session, columns=columns,
+            market_value_column=market_value_column, industry_column=industry_column,
+            settings=settings,
+        )
 
     def validate(self, start: date, end: date, n_sample: int = 5) -> None:
         """随机抽取结果日期，比较全区间与逐日计算的全部证券、全部列。

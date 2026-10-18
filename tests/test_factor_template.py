@@ -39,9 +39,13 @@ def test_template_closed_interval_uses_half_open_universe_query(template, monkey
     class Result:
         def __init__(self, first, last):
             days = pd.bdate_range(first, last, inclusive="left")
+            self.session = object()
+            self.data_ref = "templateFactorData"
             self.data = pd.DataFrame({
                 "time": days,
                 "code": ["000001.SZ"] * len(days),
+                "industry_l0": [1.0] * len(days),
+                "circ_mv": [100.0] * len(days),
                 "momentum": [day.day / 100 for day in days],
             })
 
@@ -51,11 +55,27 @@ def test_template_closed_interval_uses_half_open_universe_query(template, monkey
         def __exit__(self, *_):
             return False
 
+    current = {}
+    preprocessing = []
+
     def query(self, first, last, **kwargs):
         calls.append((first, last, kwargs))
-        return Result(first, last)
+        current["result"] = Result(first, last)
+        return current["result"]
+
+    def preprocess(self, data, *, session, columns):
+        result = current["result"]
+        assert data == result.data_ref
+        assert session is result.session
+        assert columns == ["momentum"]
+        preprocessing.append(data)
+        frame = result.data[["time", "code", *columns]].copy()
+        frame = frame.rename(columns={"time": "date", "code": "symbol"})
+        frame["symbol"] = frame["symbol"].str.replace(".SZ", ".XSHE", regex=False)
+        return frame.set_index(["date", "symbol"]).sort_index()
 
     monkeypatch.setattr(Universe, "query", query)
+    monkeypatch.setattr(template.Factor, "preprocess", preprocess)
     params = template.FactorParams()
     assert "start" not in type(params).model_fields
     assert "end" not in type(params).model_fields
@@ -64,6 +84,8 @@ def test_template_closed_interval_uses_half_open_universe_query(template, monkey
     assert calls[0][0:2] == (start, end + timedelta(days=1))
     assert calls[0][2]["lookback"] == timedelta(days=110)
     assert calls[0][2]["filters"] == [Universe.member]
+    assert calls[0][2]["factors"] == ["industry_l0", "circ_mv"]
+    assert preprocessing == ["templateFactorData"]
     assert panel.index.get_level_values("date").date.tolist() == pd.bdate_range(start, end).date.tolist()
     assert set(panel.index.get_level_values("symbol")) == {"000001.XSHE"}
 
