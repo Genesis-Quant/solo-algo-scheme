@@ -20,10 +20,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--project", type=Path)
     parser.add_argument("--validate", action="store_true")
-    parser.add_argument("--validate-factor", action="store_true")
     arguments = parser.parse_args(argv)
-    if arguments.validate_factor and (arguments.command != "parameters" or not arguments.validate):
-        parser.error("--validate-factor 仅可与 parameters --validate 一起使用（JSON stdin）")
     try:
         if arguments.command == "parameters":
             from .parameters import inspect_project
@@ -31,11 +28,7 @@ def main(argv: list[str] | None = None) -> int:
             if arguments.project is None:
                 raise ValueError("parameters 需要 --project")
             values = json.load(sys.stdin) if arguments.validate else None
-            if arguments.validate_factor and not isinstance(values, dict):
-                raise ValueError("--validate-factor 需要 JSON 对象表单参数")
-            result = inspect_project(
-                arguments.project.resolve(), values, validate_factor=arguments.validate_factor,
-            )
+            result = inspect_project(arguments.project.resolve(), values)
             print(json.dumps(result, ensure_ascii=False))
             return 0
         if arguments.input is None or arguments.output is None:

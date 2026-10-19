@@ -126,9 +126,7 @@ def _analysis_type(form: type[ReportForm], expected: type[BaseModel]) -> type[Ba
     raise ValueError(f"{form.__name__} 必须声明 ReportForm[{expected.__name__}] 或其分析子类")
 
 
-def inspect_project(
-    directory: Path, values: dict | None = None, *, validate_factor: bool = False,
-) -> dict:
+def inspect_project(directory: Path, values: dict | None = None) -> dict:
     metadata = tomllib.loads((directory / "pyproject.toml").read_text())
     module_name = metadata.get("tool", {}).get("uv", {}).get("build-backend", {}).get(
         "module-name"
@@ -200,8 +198,6 @@ def inspect_project(
         analysis._bind_columns(algo_type)
         factor_params = project_parameters(factor_model, analysis)
         analysis_params = project_parameters(FactorAnalysisParams, analysis)
-        if validate_factor:
-            algo_type(factor_params).validate(analysis.start, analysis.end)
         return {
             "entry": f"{module_name}:Factor",
             "factor": factor_params.model_dump(mode="json"),
