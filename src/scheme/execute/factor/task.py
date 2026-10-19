@@ -1,14 +1,13 @@
 from typing import Any
 
+from runtime.utils import logger as log
+
 from scheme.base import Factor
 from scheme.execute.factor.api import analyze_factors
 from scheme.execute.packages import installed_versions, load_component
 from scheme.execute.results import check_output, save_run
 from scheme.execute.schema import FactorTask
 from scheme.execute.strategy.assembly import parameter_type, project_parameters
-from scheme.log import get_logger
-
-log = get_logger("scheme.task")
 
 
 def run(data: dict[str, Any]) -> int:

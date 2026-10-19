@@ -1,14 +1,13 @@
 from importlib.metadata import distribution
 
+from runtime.utils import logger as log
+
 from scheme.base import Algo, ResearchContext
 from scheme.execute.packages import installed_versions, load_component, load_entry
 from scheme.execute.results import check_output, save_run
 from scheme.execute.schema import AlgoTask
 from scheme.execute.strategy import run_backtest
 from scheme.execute.strategy.assembly import Strategy, context_type
-from scheme.log import get_logger
-
-log = get_logger("scheme.task")
 
 
 def run(task: AlgoTask) -> int:

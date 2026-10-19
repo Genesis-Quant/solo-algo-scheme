@@ -1,7 +1,6 @@
 from collections.abc import Sequence
 from datetime import timedelta
 from functools import cached_property
-from time import perf_counter
 from typing import Any, Generic, TypeVar
 from uuid import uuid4
 
@@ -17,18 +16,18 @@ from backtest import (
     TradeDetail,
 )
 from pydantic import BaseModel
+from runtime.utils import logger as log
 
+from scheme._errors import error_text
 from scheme.base import Algo, ResearchContext, StrategyAnalysisParams
-from scheme.config import DolphinSettings
+from scheme.config import BacktestSettings, DolphinSettings
 from scheme.data import query
+from scheme.data.dolphindb.database import create_session
 from scheme.data.dolphindb.symbols import engine_symbol, source_symbol
 from scheme.execute.strategy.assembly import validate_context
 from scheme.execute.strategy.engine import Backtest
-from scheme.log import duration, get_logger, mark_simulation
 
 from .result import BacktestResult
-
-log = get_logger("scheme.backtest")
 
 BacktestC = TypeVar("BacktestC", bound=BaseModel, infer_variance=True)
 C = TypeVar("C", bound=ResearchContext[Any])
@@ -50,6 +49,10 @@ class ResearchBacktest(Backtest[BacktestC], Generic[BacktestC]):
     ) -> None:
         self.settings = settings
         self.parameters = parameters
+        self.symbols = (
+            list(parameters.symbols) if parameters.symbols is not None
+            else self.universe.columns[self.universe.any(axis=0)].tolist()
+        )
         config = {
             "strategyGroup": "stock",
             "latency": np.int32(0),
@@ -70,6 +73,10 @@ class ResearchBacktest(Backtest[BacktestC], Generic[BacktestC]):
         for key, value in config.items():
             if type(value) is int and key not in {"cash", "commission", "tax"}:
                 config[key] = np.int32(value)
+        self._loaded_rows = 0
+        self._loaded_dates: set[object] = set()
+        log.debug("创建回测引擎：{}:{}，算法={}", settings.host, settings.port,
+                  [f"{type(algo).__module__}.{type(algo).__qualname__}" for algo in algos])
         super().__init__(
             settings.host,
             settings.port,
@@ -80,6 +87,8 @@ class ResearchBacktest(Backtest[BacktestC], Generic[BacktestC]):
             ctx=ctx,
             algos=algos,
         )
+        log.info("回测引擎已就绪：{}:{}，行情股票 {} 只，算法 {} 个",
+                 settings.host, settings.port, len(self.symbols), len(algos))
         try:
             self.session.run("""
                 // Daily open/close synthetic snapshots. Price limits must be supplied by source data.
@@ -134,10 +143,10 @@ class ResearchBacktest(Backtest[BacktestC], Generic[BacktestC]):
             raise
 
     def load_messages(self, start: np.datetime64, end: np.datetime64) -> DosVar:
-        codes = self.parameters.symbols
-        if codes is None:
-            codes = self.universe.columns.tolist()
-        symbols = [engine_symbol(s) for s in codes]
+        message_rows = 0
+        symbols = [engine_symbol(s) for s in self.symbols]
+        log.debug("读取行情批次 [{}，{})，股票 {} 只，来源={}",
+                  start, end, len(symbols), self.parameters.market_data)
         if not symbols:
             self.session.run("soloMessages = table(array(TIMESTAMP,0) as timestamp)")
             return DosVar("soloMessages")
@@ -157,49 +166,74 @@ class ResearchBacktest(Backtest[BacktestC], Generic[BacktestC]):
             frame = result.data
         frame["code"] = frame.code.map(engine_symbol)
         if self.parameters.market_data == "stock_snapshot":
-            self.session.upload({"soloSnapshotReference": frame})
+            # 原始五档属于 SOLO 数据源；引擎可能在另一台服务器，不能跨会话传 DOS 引用。
+            data_settings = DolphinSettings.from_env()
+            with create_session(data_settings) as source:
+                source.upload(
+                    {
+                        "soloSnapshotDB": data_settings.snapshot_database,
+                        "soloSnapshotTable": data_settings.snapshot_table,
+                        "soloBatchStart": start,
+                        "soloBatchEnd": end,
+                        "soloSHSecurityIDs": [s.split(".")[0] for s in symbols if s.endswith(".XSHG")],
+                        "soloSZSecurityIDs": [s.split(".")[0] for s in symbols if s.endswith(".XSHE")],
+                    }
+                )
+                snapshots = source.run("""
+                    soloSnapshots = loadTable(soloSnapshotDB, soloSnapshotTable)
+                    select * from soloSnapshots
+                        where TradeDate >= date(soloBatchStart), TradeDate < date(soloBatchEnd),
+                              ((Market="SH" and SecurityID in soloSHSecurityIDs) or
+                               (Market="SZ" and SecurityID in soloSZSecurityIDs)), LastPrice > 0,
+                              (TradeTime between 09:30:00.000:11:30:00.000 or
+                               TradeTime between 13:00:00.000:15:00:00.000)
+                """)
             self.session.upload(
                 {
-                    "soloSnapshotDB": self.settings.snapshot_database,
-                    "soloSnapshotTable": self.settings.snapshot_table,
-                    "soloBatchStart": start,
-                    "soloBatchEnd": end,
+                    "soloSnapshotReference": frame,
+                    "soloSnapshotRows": snapshots,
                     "soloUniverse": symbols,
-                    "soloSecurityIDs": [s.split(".")[0] for s in symbols],
                 }
             )
-            self.session.run("""
-                soloSnapshots = loadTable(soloSnapshotDB, soloSnapshotTable)
-                soloSnapshotRows = select * from soloSnapshots
-                    where TradeDate >= date(soloBatchStart), TradeDate < date(soloBatchEnd),
-                          SecurityID in soloSecurityIDs, LastPrice > 0,
-                          (TradeTime between 09:30:00.000:11:30:00.000 or
-                           TradeTime between 13:00:00.000:15:00:00.000)
+            # pandas 不保留 DDB 的 DATE/TIME 类型；上传后恢复这两列，不重建或合成盘口。
+            message_rows = self.session.run("""
+                replaceColumn!(soloSnapshotRows, `TradeDate, date(soloSnapshotRows.TradeDate))
+                replaceColumn!(soloSnapshotRows, `TradeTime, time(soloSnapshotRows.TradeTime))
                 soloMessages = soloTickMessages(soloSnapshotRows, soloSnapshotReference, soloUniverse)
+                soloMessages.rows()
             """)
+            self._loaded_dates.update(pd.to_datetime(snapshots.TradeDate).dt.date)
         else:
             columns = ["open", "close", "pre_close", "up_limit", "down_limit"]
             valid = (frame[columns].notna() & (frame[columns] > 0)).all(axis=1)
             skipped = int((~valid).sum())
             if skipped:
-                log.warning("日线价格缺失或非正，{} 条证券日记录不合成快照，当日不可交易", skipped)
+                log.warning("行情批次 [{}，{})：{} 条证券日记录缺失或非正，跳过合成；样本={}",
+                            start, end, skipped,
+                            frame.loc[~valid, ["time", "code"]].head(3).to_dict("records"))
             frame = frame[valid]
             if frame.empty:
                 self.session.run("soloMessages = table(array(TIMESTAMP,0) as timestamp)")
                 return DosVar("soloMessages")
             self.session.upload({"soloDaily": frame})
             self.session.run("soloMessages = soloDailyMessages(soloDaily)")
+            message_rows = len(frame) * 2
+            self._loaded_dates.update(frame.time.dt.date)
+        self._loaded_rows += int(message_rows)
+        completed = len(self._loaded_dates)
+        expected = len(self.universe.index) if self.parameters.symbols is None else None
+        log.info("行情已加载 [{}，{})：{} 条报价，累计 {}/{} 个交易日、{} 条报价",
+                 start, end, message_rows, completed, expected if expected is not None else "未预读",
+                 self._loaded_rows)
         return DosVar("soloMessages")
 
     @cached_property
     def universe(self) -> pd.DataFrame:
         """供 Algo 按日期读取动态股票池；行情覆盖期间成员的并集。"""
-        started = perf_counter()
         members = self.parameters.universe.evaluate(self.parameters.start, self.parameters.end)
         log.info(
-            "股票池 {}：{} 个交易日，期间成员 {} 只，用时 {:.1f} 秒",
-            self.parameters.universe.pool, len(members.index), len(members.columns),
-            perf_counter() - started,
+            "股票池 {}：{} 个交易日，期间成员 {} 只",
+            self.parameters.universe.pool, len(members.index), int(members.any(axis=0).sum()),
         )
         return members
 
@@ -217,7 +251,7 @@ def run_backtest(
     engine_type: type[ResearchBacktest[C]] = ResearchBacktest,
 ) -> BacktestResult[A]:
     """逆序事件回调后正序消费 Context 消息；仍允许 Algo 直接下单。"""
-    settings = settings or DolphinSettings.from_env()
+    settings = settings if settings is not None else BacktestSettings.from_env()
     if not algos:
         raise ValueError("至少需要一个 Algo")
     for algo in algos:
@@ -232,24 +266,26 @@ def run_backtest(
         config["cash"], config["commission"], config["tax"], parameters.benchmark or "无",
         " → ".join(type(algo).__name__ for algo in algos),
     )
-    started = perf_counter()
     try:
         result = _run(algos, ctx, parameters, settings, engine_type)
-    finally:
-        mark_simulation(None)
+    except Exception as error:
+        log.error("回测失败：{} 至 {}，引擎={}:{}；{}",
+                  parameters.start, parameters.end, settings.host, settings.port,
+                  error_text(error, settings.password.get_secret_value()))
+        raise
     try:
-        _summarize(result, perf_counter() - started)
-    except Exception:
+        _summarize(result)
+    except Exception as error:
         # 汇总日志不能让已经完成的回测失败。
-        log.opt(exception=True).warning("回测结果汇总失败")
+        log.warning("回测已完成，但结果摘要生成失败；原始报告保留：{}", error_text(error))
     return result
 
 
-def _summarize(result: BacktestResult[Any], seconds: float) -> None:
+def _summarize(result: BacktestResult[Any]) -> None:
     """回测结束的收益、费用和订单汇总；拒单按插件返回的原因归类为警告。"""
     portfolios = result.daily_portfolios
     if portfolios.empty:
-        log.warning("回测没有生成账户记录，用时 {}", duration(seconds))
+        log.warning("回测没有生成账户记录")
         return
     net_value = portfolios.netValue
     drawdown = (1 - net_value / net_value.cummax().clip(lower=1.0)).max()
@@ -262,10 +298,10 @@ def _summarize(result: BacktestResult[Any], seconds: float) -> None:
     filled = details.loc[details.orderStatus == OrderStatus.FILLED, "orderId"].nunique()
     rejected = details[details.orderStatus == OrderStatus.REJECTED]
     log.info(
-        "回测完成：{} 至 {} 共 {} 个交易日，用时 {}；净值 {:.4f}（{:+.2%}），基准 {}，"
+        "回测完成：{} 至 {} 共 {} 个交易日；净值 {:.4f}（{:+.2%}），基准 {}，"
         "最大回撤 {:.2%}，手续费 {:,.0f}；订单 {}，全部成交 {}，拒单 {}",
         portfolios.tradeDate.iloc[0], portfolios.tradeDate.iloc[-1], len(portfolios),
-        duration(seconds), net_value.iloc[-1], net_value.iloc[-1] - 1, benchmark, drawdown,
+        net_value.iloc[-1], net_value.iloc[-1] - 1, benchmark, drawdown,
         portfolios.totalFee.iloc[-1], orders, filled, rejected.orderId.nunique(),
     )
     if not rejected.empty:
@@ -276,7 +312,7 @@ def _summarize(result: BacktestResult[Any], seconds: float) -> None:
         log.warning(
             "拒单 {} 笔（买入 {}，卖出 {}）：{}", len(rejected), buys, len(rejected) - buys,
             "；".join(f"{reason} {count} 笔" for reason, count in reasons.items())
-            if not reasons.empty else "插件未返回原因，DEBUG 日志含逐笔明细",
+            if not reasons.empty else "插件未返回拒单原因；按订单号查看 WARNING 回报或成交明细",
         )
 
 

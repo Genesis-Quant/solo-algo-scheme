@@ -1,11 +1,10 @@
 import json
 
-from scheme.log import get_logger
+from runtime.utils import logger as log
+
 from scheme.report.base import Report
 
 from .schema import Task
-
-log = get_logger("scheme.task")
 
 
 def check_output(task: Task) -> None:
@@ -15,7 +14,7 @@ def check_output(task: Task) -> None:
 
 def save_run(task: Task, result: Report, versions: dict[str, str]) -> None:
     paths = result.save(task.output)
-    # 最后写成功清单，部分失败的 Parquet 不会被视为完整报告。
+    # 成功清单最后发布，避免把部分写入的 Parquet 视为完整报告。
     temporary = task.output / "run.json.tmp"
     temporary.write_text(
         json.dumps(
@@ -33,8 +32,5 @@ def save_run(task: Task, result: Report, versions: dict[str, str]) -> None:
         encoding="utf-8",
     )
     temporary.replace(task.output / "run.json")
-    log.info(
-        "报告已保存：{} 个文件（{}），共 {:.1f} MB → {}",
-        len(paths), ", ".join(path.name for path in paths),
-        sum(path.stat().st_size for path in paths) / 2**20, task.output,
-    )
+    log.success("报告已保存：{} 个文件，共 {} 字节，目录 {}",
+                len(paths), sum(path.stat().st_size for path in paths), task.output)

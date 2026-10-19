@@ -7,16 +7,14 @@ import numpy as np
 import pandas as pd
 from backtest import Direction, MarketOrder
 from pydantic import BaseModel
+from runtime.utils import logger as log
 
 from scheme.base.internal.algo import Algo
 from scheme.base.internal.context import ResearchContext
 from scheme.base.internal.types import Order, Target
 from scheme.data.dolphindb.symbols import normalize_assets
-from scheme.log import get_logger
 
 __all__ = ["ControlAlgo"]
-
-log = get_logger("scheme.control")
 
 P = TypeVar("P", bound=BaseModel, infer_variance=True)
 C = TypeVar("C", bound=ResearchContext[Any], infer_variance=True)

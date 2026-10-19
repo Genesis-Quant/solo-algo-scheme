@@ -1,13 +1,7 @@
-"""首次空 codes 查询时初始化进程级全时段证券域，结果支持 with。
-
-模块导入不连接数据库。每个研究进程第一次空 codes 查询读取 CoreData 全时间范围内
-所有出现过记录的代码，不按输出日期或 close 筛选；之后空 codes 查询复用该快照，
-显式 codes 原样保留。日期轴和成员填充沿用 Runtime 规则。
-"""
+"""空 codes 使用 Arena Runtime 缓存的 Tushare stock_basic 股票列表。"""
 
 import json
 from datetime import timedelta
-from threading import Lock
 from typing import Any
 
 import numpy as np
@@ -15,22 +9,24 @@ import pandas as pd
 from runtime.apps.query import FactorQuery
 from runtime.apps.query import api as _runtime
 from runtime.apps.query.result import QueryResult
+from runtime.utils import get_codes
+from runtime.utils import logger as log
 
-from .backtest import backtest
+from scheme._errors import error_text
+from scheme.config import DolphinSettings
 
-__all__ = ["query", "backtest"]
+from .database.session import open_session
 
-_ALL_CODES: tuple[str, ...] | None = None
-_CODES_LOCK = Lock()
+__all__ = ["query"]
 
 
 def query(
     request: FactorQuery | dict[str, Any],
     *,
     session: Any | None = None,
+    settings: DolphinSettings | None = None,
 ) -> QueryResult:
-    """补齐空 codes 后执行单次查询；成功后会话交由 Runtime QueryResult 持有。"""
-    global _ALL_CODES
+    """使用 SOLO 数据连接查询；成功后会话交由 Runtime QueryResult 持有。"""
     validated = _runtime.validate_factor_query(request)
     output_start, output_end = _runtime.normalize_date_range(
         validated.start_date, validated.end_date,
@@ -43,25 +39,36 @@ def query(
         _runtime.TIME_COLUMN, _runtime.CODE_COLUMN, *validated.factors, *validated.derivatives,
     ]
     seed_factors = [factor for factor in source_factors if factor in _runtime.INDUSTRY_FACTORS]
+    settings = settings if settings is not None else DolphinSettings.from_env()
+    core_table = (
+        f"loadTable({json.dumps(settings.database, ensure_ascii=False)}, "
+        f"{json.dumps(settings.table, ensure_ascii=False)})"
+    )
     owns_session = session is None
-    if owns_session:
-        session = _runtime.create_session(max_time=_runtime.QUERY_SESSION_MAX_TIME)
+    log.info(
+        "查询 {} 至 {}（含），股票={}，字段={}，衍生列={}，筛选={}；数据源={}:{}",
+        output_start.date(), output_end.date(),
+        len(validated.codes) if validated.codes else "stock_basic 全部股票",
+        validated.factors, list(validated.derivatives), validated.filters,
+        settings.host, settings.port,
+    )
     try:
-        _runtime.redirect_session_output(session)
+        if owns_session:
+            session = open_session(settings, max_time=3600)
+        else:
+            _runtime.redirect_session_output(session)
+            log.debug("查询复用调用方连接：{}:{}，{}/{}",
+                      settings.host, settings.port, settings.database, settings.table)
         if not validated.codes:
-            with _CODES_LOCK:
-                if _ALL_CODES is None:
-                    _ALL_CODES = tuple(str(code) for code in session.run(
-                        "exec string(code) from (select count(*) as records from "
-                        f"{_runtime.CORE_TABLE} group by code) "
-                        "where not isNull(code) order by code"
-                    ))
-            validated = validated.model_copy(update={"codes": list(_ALL_CODES)})
+            codes = get_codes()
+            validated = validated.model_copy(update={"codes": list(codes)})
+            log.debug("stock_basic 股票域：{} 只，复用 Runtime 进程缓存", len(codes))
 
-        # 代码轴已固定，只读取真实交易日，不再查询当前区间的 close 代码并集。
+        log.debug("交易日历范围 {} 至 {}，包含 lookback {}",
+                  calculation_start.date(), output_end.date(), validated.lookback)
         session.upload({"coreAxisStart": calculation_start, "coreAxisEnd": output_end + timedelta(days=1)})
         dates = pd.DatetimeIndex(session.run(f"""
-            exec distinct date(time) from {_runtime.CORE_TABLE}
+            exec distinct date(time) from {core_table}
             where factor = `close, time >= coreAxisStart, time < coreAxisEnd
             order by date(time)
         """))
@@ -85,21 +92,26 @@ def query(
             "coreOutputStart": output_start,
             "coreOutputEnd": output_end + timedelta(days=1),
         })
+        log.debug("使用 query 模块；基础字段={}，历史种子字段={}", source_factors, seed_factors)
         session.run("use query")
-        if not _runtime.has_session_variable(session, _runtime.SOURCE_REF):
+        source_cached = _runtime.has_session_variable(session, _runtime.SOURCE_REF, log_progress=False)
+        log.debug("基础数据缓存={}；股票={}，历史交易日={}", source_cached, len(validated.codes), len(dates))
+        if not source_cached:
             session.run(f"""
                 {_runtime.SOURCE_REF} = build_factor_source(
-                    {_runtime.CORE_TABLE}, coreQueryCodes, coreQueryFactors,
+                    {core_table}, coreQueryCodes, coreQueryFactors,
                     coreQueryDates, coreQueryStart, coreQueryEnd, coreQuerySeedFactors
                 )
             """)
             for factor in source_factors:
                 name = json.dumps(factor, ensure_ascii=False)
                 if factor == _runtime.IS_ST_FACTOR:
+                    log.debug("字段 {}：缺失填零", factor)
                     session.run(f"""
                         {_runtime.SOURCE_REF} = fill_null_column({_runtime.SOURCE_REF}, {name}, 0.0)
                     """)
                 elif factor.startswith(_runtime.WEIGHT_PREFIX):
+                    log.debug("字段 {}：观测日补零后按证券前向填充", factor)
                     session.run(f"""
                         {_runtime.SOURCE_REF} = fill_observed_group_null_column(
                             {_runtime.SOURCE_REF}, {name}, {_runtime.SOURCE_REF}.time, 0.0
@@ -110,6 +122,7 @@ def query(
                         )
                     """)
                 elif factor in _runtime.FINANCIAL_FACTORS or factor in _runtime.INDUSTRY_FACTORS:
+                    log.debug("字段 {}：按证券前向填充", factor)
                     session.run(f"""
                         {_runtime.SOURCE_REF} = forward_fill_column(
                             {_runtime.SOURCE_REF}, {name}, {_runtime.SOURCE_REF}.code,
@@ -119,20 +132,44 @@ def query(
             session.run(f"""
                 {_runtime.SOURCE_REF} = finalize_factor_source({_runtime.SOURCE_REF}, coreQueryFactors)
             """)
+        log.debug("计算 DSL：{}", list(validated.derivatives))
         session.run(f"""
             {_runtime.COMPUTED_REF} = compute_factors(
                 {_runtime.SOURCE_REF}, fromStdJson(coreDslDefinitionsJson)
             )
+        """)
+        session.run(f"""
             {_runtime.FILTERED_REF} = filter_factors({_runtime.COMPUTED_REF}, coreDslFilters)
+        """)
+        row_count = session.run(f"""
             {_runtime.DATA_REF} = project_factor_output(
                 {_runtime.FILTERED_REF}, coreDslOutputColumns, coreOutputStart, coreOutputEnd
             )
+            {_runtime.DATA_REF}.rows()
         """)
-        return QueryResult(
+        result = QueryResult(
             session=session, source_ref=_runtime.SOURCE_REF, computed_ref=_runtime.COMPUTED_REF,
             filtered_ref=_runtime.FILTERED_REF, data_ref=_runtime.DATA_REF,
         )
-    except BaseException:
-        if owns_session:
-            session.close()
+        log.info(
+            "查询返回 {} 行、{} 列，股票域 {} 只，范围 {} 至 {}",
+            row_count, len(output_columns), len(validated.codes),
+            output_start.date(), output_end.date(),
+        )
+        if row_count == 0:
+            log.warning("查询结果为空：{} 至 {}，筛选={}",
+                        output_start.date(), output_end.date(), validated.filters)
+        return result
+    except BaseException as error:
+        log.error(
+            "查询失败：{}:{}，范围 {} 至 {}；{}",
+            settings.host, settings.port, output_start.date(), output_end.date(),
+            error_text(error, settings.password.get_secret_value()),
+        )
+        if owns_session and session is not None:
+            try:
+                session.close()
+            except Exception as close_error:
+                log.warning("查询失败后的连接回收失败：{}",
+                            error_text(close_error, settings.password.get_secret_value()))
         raise

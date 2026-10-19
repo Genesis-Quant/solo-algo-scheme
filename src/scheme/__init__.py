@@ -22,6 +22,7 @@ from backtest import (
     TWAPOrder,
     VWAPOrder,
 )
+from runtime.utils import logger
 
 from .base import (
     Algo,
@@ -42,10 +43,6 @@ from .base import (
 from .data.dolphindb.universe import StockPool, Universe
 from .execute.strategy.assembly import AlgoComponents, Strategy
 from .execute.strategy.components import algo_options
-from .log import configure as _configure_logging
-
-# 沿用 Arena 日志格式，研究进程默认只显示 INFO 及以上。
-_configure_logging()
 
 __all__ = [
     "algo_options",
@@ -65,6 +62,7 @@ __all__ = [
     "Factor",
     "FactorParams",
     "LimitOrder",
+    "logger",
     "MarketOrder",
     "ModelAlgo",
     "OptimizeAlgo",

@@ -5,16 +5,14 @@ from __future__ import annotations
 from typing import Any, Generic, TypeVar
 
 from pydantic import Field
+from runtime.utils import logger as log
 
 from scheme.base.internal.context import ResearchContext
 from scheme.base.internal.types import Order, Target
 from scheme.base.projects.control import ControlAlgo
 from scheme.base.projects.control import ControlParams as BaseControlParams
-from scheme.log import get_logger
 
 __all__ = ["ControlParams", "NoControl"]
-
-log = get_logger("scheme.control")
 
 C = TypeVar("C", bound=ResearchContext[Any], infer_variance=True)
 

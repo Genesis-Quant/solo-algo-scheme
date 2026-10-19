@@ -9,6 +9,7 @@ from typing import Any, Generic, TypeVar
 import numpy as np
 import pandas as pd
 from pydantic import Field
+from runtime.utils import logger as log
 from scipy.optimize import minimize
 
 from scheme.base.internal.context import ResearchContext
@@ -17,11 +18,8 @@ from scheme.base.projects.optimize import OptimizeAlgo
 from scheme.base.projects.optimize import OptimizeParams as BaseOptimizeParams
 from scheme.data import query
 from scheme.data.dolphindb.symbols import engine_symbol, normalize_assets, source_symbol
-from scheme.log import get_logger
 
 __all__ = ["risk_parity", "OptimizeParams", "RiskParity"]
-
-log = get_logger("scheme.optimize")
 
 C = TypeVar("C", bound=ResearchContext[Any], infer_variance=True)
 

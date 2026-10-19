@@ -1,7 +1,7 @@
-"""固定全时段证券域中的逐日股票池成员，不预筛选区间候选代码。
+"""Tushare 固定股票列表中的逐日股票池成员，不预筛选区间候选代码。
 
-codes 留空，由 scheme.data.query 在进程首次空 codes 查询时读取并缓存 CoreData
-全时间范围内出现过记录的所有代码；导入模块不连接数据库，后续查询复用该证券域。
+codes 留空，由 scheme.data.query 复用 Arena Runtime 的 stock_basic 股票列表，
+合并上市、退市、暂停上市股票并在进程内缓存；导入模块不联网。
 日期轴沿用 Runtime 的真实 close 交易日。成员来自 CoreData 指数权重，
 缺失权重按观测日补零后逐代码前向填充；成员列默认仅输出，由调用者选择 filters 或 on。
 """

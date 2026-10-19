@@ -7,17 +7,16 @@ import re
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import Version
-
-from scheme.log import get_logger
+from runtime.utils import logger as log
 
 from .schema import Package
-
-log = get_logger("scheme.task")
 
 
 def installed_versions() -> dict[str, str]:
     versions = {canonicalize_name(d.metadata["Name"]): d.version for d in metadata.distributions()}
-    log.debug("任务环境：{}", "，".join(f"{name} {version}" for name, version in sorted(versions.items())))
+    log.info("运行环境：Scheme {}，Backtest {}，Arena Runtime {}，DolphinDB SDK {}",
+             versions.get("scheme", "未安装"), versions.get("backtest", "未安装"),
+             versions.get("arena-runtime", "未安装"), versions.get("dolphindb", "未安装"))
     return versions
 
 

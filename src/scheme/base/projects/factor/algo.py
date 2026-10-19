@@ -8,16 +8,15 @@ from typing import ClassVar, Generic, TypeVar
 
 import pandas as pd
 from backtest import DosVar
+from runtime.utils import logger as log
 
+from scheme._errors import error_text
 from scheme.config import DolphinSettings
-from scheme.log import get_logger
 
 from .params import FactorParams
 from .preprocess import preprocess
 
 __all__ = ["Factor"]
-
-log = get_logger("scheme.factor")
 
 P = TypeVar("P", bound=FactorParams, infer_variance=True)
 
@@ -92,13 +91,41 @@ class Factor(ABC, Generic[P]):
             }:
                 raise ValueError(f"{cls.__name__}.columns 因子列不能与键、暴露或分析保留列重名")
         compute = cls.__dict__.get("compute")
-        if compute is not None and not getattr(compute, "__isabstractmethod__", False):
+        if (
+            compute is not None
+            and not getattr(compute, "__isabstractmethod__", False)
+            and getattr(compute, "_scheme_checked_compute", None) is not compute
+        ):
             @wraps(compute)
             def checked_compute(self, *args, **kwargs):
-                return _validate_result(
-                    compute(self, *args, **kwargs), self.columns, f"{type(self).__name__}.compute",
+                name = f"{type(self).__module__}.{type(self).__qualname__}"
+                start = kwargs.get("start", args[0] if args else None)
+                end = kwargs.get("end", args[1] if len(args) > 1 else None)
+                log.info(
+                    "因子计算开始：{}，区间 {} 至 {}，因子列 {}",
+                    name, start if isinstance(start, date) else "未知",
+                    end if isinstance(end, date) else "未知", self.columns,
                 )
+                try:
+                    panel = compute(self, *args, **kwargs)
+                    panel = _validate_result(panel, self.columns, f"{name}.compute")
+                    log.opt(lazy=True).info(
+                        "因子计算完成：{}，{} 行，{} 个日期，{} 只证券；"
+                        "各因子 NULL 数 {}",
+                        lambda: name, lambda: len(panel),
+                        lambda: panel.index.get_level_values("date").nunique(),
+                        lambda: panel.index.get_level_values("symbol").nunique(),
+                        lambda: panel.isna().sum().to_dict(),
+                    )
+                    return panel
+                except Exception as error:
+                    log.error(
+                        "因子计算失败：{}，范围 {} 至 {}；{}",
+                        name, start, end, error_text(error),
+                    )
+                    raise
 
+            checked_compute._scheme_checked_compute = checked_compute
             cls.compute = checked_compute
 
     def __init__(self, params: P) -> None:
@@ -141,73 +168,110 @@ class Factor(ABC, Generic[P]):
         数值容差固定为 rtol=1e-7、atol=1e-10，非数值和 NULL 位置须一致。
         不一致时抛出 ValueError；通过仅说明抽样一致，并非不存在未来依赖的证明。
         """
-        if isinstance(n_sample, bool) or not isinstance(n_sample, int) or n_sample <= 0:
-            raise ValueError("n_sample 必须是正整数")
-        if start > end:
-            raise ValueError("日期区间必须满足 start <= end，采用 [start, end]")
-
-        context = f"全区间 {start} 至 {end}"
+        factor_name = f"{type(self).__module__}.{type(self).__qualname__}"
+        log.info(
+            "因子抽样校验开始：{}，区间 {} 至 {}，因子列 {}",
+            factor_name, start if isinstance(start, date) else "未知",
+            end if isinstance(end, date) else "未知", self.columns,
+        )
+        sample_index, sample_total, sample_day = 0, 0, None
         try:
-            panel = self.compute(start, end)
-        except ValueError as error:
-            raise ValueError(f"{context}：{error}") from error
-        dates = _panel_dates(panel, context)
-        outside = (dates < pd.Timestamp(start)) | (dates > pd.Timestamp(end))
-        if outside.any():
-            raise ValueError(
-                f"全区间结果日期超出 [{start}, {end}]：{dates[outside].unique().tolist()}"
-            )
-        days = dates.unique().date.tolist()
-        sampled = sample(days, min(n_sample, len(days)))
-        log.info("因子抽样校验日期：{}", ", ".join(day.isoformat() for day in sampled))
-        # 仅快照抽中的日期，且必须在任何单日 compute 可能改写复用面板之前完成。
-        snapshots = [
-            (day, panel.loc[dates == pd.Timestamp(day)].copy()) for day in sampled
-        ]
-        for day, expected in snapshots:
-            context = f"样本日期 {day}"
+            if isinstance(n_sample, bool) or not isinstance(n_sample, int) or n_sample <= 0:
+                raise ValueError("n_sample 必须是正整数")
+            if start > end:
+                raise ValueError("日期区间必须满足 start <= end，采用 [start, end]")
+
+            context = f"全区间 {start} 至 {end}"
             try:
-                actual = self.compute(day, day)
+                panel = self.compute(start, end)
             except ValueError as error:
                 raise ValueError(f"{context}：{error}") from error
-            actual_dates = _panel_dates(actual, context)
-            if not (actual_dates == pd.Timestamp(day)).all():
+            dates = _panel_dates(panel, context)
+            outside = (dates < pd.Timestamp(start)) | (dates > pd.Timestamp(end))
+            if outside.any():
                 raise ValueError(
-                    f"{context}：单日结果含非当天日期 {actual_dates.unique().tolist()}"
+                    f"全区间结果日期超出 [{start}, {end}]：{dates[outside].unique().tolist()}"
                 )
-            # 日期已完整核对；按证券比较也兼容 date 与午夜 Timestamp 的表示差异。
-            expected = expected.droplevel("date")
-            actual = actual.droplevel("date")
-            for name, left, right in (
-                ("索引", expected.index, actual.index),
-                ("列", expected.columns, actual.columns),
-            ):
-                missing = left.difference(right, sort=False)
-                extra = right.difference(left, sort=False)
-                if len(missing) or len(extra):
-                    raise ValueError(
-                        f"{context}：{name}不一致，单日缺少 {missing[:5].tolist()}"
-                        f"（{len(missing)} 项），额外 {extra[:5].tolist()}（{len(extra)} 项）"
-                    )
-            try:
-                pd.testing.assert_frame_equal(
-                    expected.isna(), actual.isna(), check_like=True, check_exact=True,
-                )
-            except AssertionError as error:
-                raise ValueError(f"{context}：NULL 掩码不一致\n{error}") from error
-            # NULL 位置已精确比较，逐列只比较非空值，允许 None/NaN/pd.NA 表示不同。
-            for column in expected.columns:
-                left = expected[column].dropna().infer_objects(copy=False)
-                right = actual[column].dropna().infer_objects(copy=False)
-                numeric = all(
-                    pd.api.types.is_numeric_dtype(values.dtype)
-                    and not pd.api.types.is_bool_dtype(values.dtype)
-                    for values in (left, right)
+            days = dates.unique().date.tolist()
+            log.opt(lazy=True).info(
+                "因子抽样校验全区间结果：{}，{} 行、{} 列、{} 个日期、{} 只证券",
+                lambda: factor_name, lambda: len(panel), lambda: len(panel.columns),
+                lambda: len(days), lambda: panel.index.get_level_values("symbol").nunique(),
+            )
+            sampled = sample(days, min(n_sample, len(days)))
+            sample_total = len(sampled)
+            log.info("因子抽样校验日期：{}", ", ".join(day.isoformat() for day in sampled))
+            # 仅快照抽中的日期，且必须在任何单日 compute 可能改写复用面板之前完成。
+            snapshots = [
+                (day, panel.loc[dates == pd.Timestamp(day)].copy()) for day in sampled
+            ]
+            for sample_index, (day, expected) in enumerate(snapshots, 1):
+                sample_day = day
+                context = f"样本日期 {day}"
+                log.debug(
+                    "因子抽样校验样本 {}/{} 开始：{}，日期 {}",
+                    sample_index, sample_total, factor_name, day,
                 )
                 try:
-                    pd.testing.assert_series_equal(
-                        left, right, check_like=True, check_dtype=False, check_exact=not numeric,
-                        check_categorical=False, rtol=1e-7, atol=1e-10,
+                    actual = self.compute(day, day)
+                except ValueError as error:
+                    raise ValueError(f"{context}：{error}") from error
+                log.debug(
+                    "因子抽样校验样本 {}/{} 计算完成：{}，日期 {}",
+                    sample_index, sample_total, factor_name, day,
+                )
+                actual_dates = _panel_dates(actual, context)
+                if not (actual_dates == pd.Timestamp(day)).all():
+                    raise ValueError(
+                        f"{context}：单日结果含非当天日期 {actual_dates.unique().tolist()}"
+                    )
+                # 日期已完整核对；按证券比较也兼容 date 与午夜 Timestamp 的表示差异。
+                expected = expected.droplevel("date")
+                actual = actual.droplevel("date")
+                for name, left, right in (
+                    ("索引", expected.index, actual.index),
+                    ("列", expected.columns, actual.columns),
+                ):
+                    missing = left.difference(right, sort=False)
+                    extra = right.difference(left, sort=False)
+                    if len(missing) or len(extra):
+                        raise ValueError(
+                            f"{context}：{name}不一致，单日缺少 {missing[:5].tolist()}"
+                            f"（{len(missing)} 项），额外 {extra[:5].tolist()}（{len(extra)} 项）"
+                        )
+                try:
+                    pd.testing.assert_frame_equal(
+                        expected.isna(), actual.isna(), check_like=True, check_exact=True,
                     )
                 except AssertionError as error:
-                    raise ValueError(f"{context}：列 {column!r} 因子值不一致\n{error}") from error
+                    raise ValueError(f"{context}：NULL 掩码不一致\n{error}") from error
+                # NULL 位置已精确比较，逐列只比较非空值，允许 None/NaN/pd.NA 表示不同。
+                for column in expected.columns:
+                    left = expected[column].dropna().infer_objects(copy=False)
+                    right = actual[column].dropna().infer_objects(copy=False)
+                    numeric = all(
+                        pd.api.types.is_numeric_dtype(values.dtype)
+                        and not pd.api.types.is_bool_dtype(values.dtype)
+                        for values in (left, right)
+                    )
+                    try:
+                        pd.testing.assert_series_equal(
+                            left, right, check_like=True, check_dtype=False, check_exact=not numeric,
+                            check_categorical=False, rtol=1e-7, atol=1e-10,
+                        )
+                    except AssertionError as error:
+                        raise ValueError(f"{context}：列 {column!r} 因子值不一致\n{error}") from error
+                log.info(
+                    "因子抽样校验样本 {}/{} 比较通过：{}，日期 {}",
+                    sample_index, sample_total, factor_name, day,
+                )
+            log.info(
+                "因子抽样校验全部通过：{}，{} 个样本",
+                factor_name, sample_total,
+            )
+        except Exception as error:
+            log.error(
+                "因子校验失败：{}，样本 {}/{}，日期={}；{}",
+                factor_name, sample_index, sample_total, sample_day, error_text(error),
+            )
+            raise

@@ -6,16 +6,14 @@ from datetime import time
 from typing import Any, Generic, TypeVar
 
 import pandas as pd
+from runtime.utils import logger as log
 
 from scheme.base.internal.context import ResearchContext
 from scheme.base.internal.types import Order
 from scheme.base.projects.execution import ExecutionAlgo
 from scheme.base.projects.execution import ExecutionParams as BaseExecutionParams
-from scheme.log import get_logger
 
 __all__ = ["DefaultParams", "DirectExecution"]
-
-log = get_logger("scheme.execution")
 
 C = TypeVar("C", bound=ResearchContext[Any], infer_variance=True)
 

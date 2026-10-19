@@ -1,8 +1,8 @@
-from time import perf_counter
 from typing import Any, TypeVar
 
 import numpy as np
 import pandas as pd
+from runtime.utils import logger as log
 
 from scheme.base import Factor, FactorAnalysisParams, FactorParams
 from scheme.base.projects.factor.algo import _validate_result
@@ -10,11 +10,8 @@ from scheme.config import DolphinSettings
 from scheme.data import query
 from scheme.data.dolphindb.database import create_session
 from scheme.data.dolphindb.symbols import engine_symbol, source_symbol
-from scheme.log import get_logger
 
 from .result import FactorAnalysisResult
-
-log = get_logger("scheme.factor")
 
 P = TypeVar("P", bound=FactorParams)
 A = TypeVar("A", bound=FactorAnalysisParams)
@@ -65,59 +62,45 @@ def analyze_factors(
     settings: DolphinSettings | None = None,
 ) -> FactorAnalysisResult[A]:
     parameters._bind_columns(factor)
-    settings = settings or DolphinSettings.from_env()
-    started = perf_counter()
+    settings = settings if settings is not None else DolphinSettings.from_env()
     log.info(
-        "因子分析：{} {} 至 {}（含），因子列 {}，持有期 {}，价格 {}，最大滞后 {}，收益 {}，{} 组，{}",
-        type(factor).__name__, parameters.start, parameters.end, ", ".join(parameters.columns),
-        parameters.period, parameters.price_column, parameters.max_lag,
-        ", ".join(parameters.return_columns), parameters.groups,
-        "市值加权" if parameters.weight == "market_value" else "等权",
+        "因子分析：{} 至 {}，因子={}，收益={}，分组={}，加权={}",
+        parameters.start, parameters.end, parameters.columns,
+        parameters.return_columns, parameters.groups, parameters.weight,
     )
     source = prepare_panel(factor.compute(parameters.start, parameters.end), parameters)
-    log.info(
-        "因子计算完成：{} 条记录，{} 只证券，{} 个交易日，用时 {:.1f} 秒",
-        len(source), source.code.nunique(), source.time.nunique(), perf_counter() - started,
-    )
     with create_session(settings) as session:
-        # 不扩展研究结束日；滞后价格按查询交易日轴位移，缺行情和超出区间均保留 NULL。
         with query(
             {
                 "start_date": parameters.start.isoformat(),
                 "end_date": parameters.end.isoformat(),
-                "codes": sorted(
-                    {source_symbol(s) for s in source.code}
-                    | {source_symbol(parameters.calendar_symbol)}
-                ),
+                "codes": sorted({source_symbol(s) for s in source.code}
+                                | {source_symbol(parameters.calendar_symbol)}),
                 "factors": ["circ_mv"] if parameters.weight == "market_value" else [],
                 "derivatives": _return_derivatives(
                     parameters.period, parameters.max_lag, parameters.price_column,
                 ),
             },
-            session=session,
+            session=session, settings=settings,
         ) as result:
             codes = sorted(set(source.code) | {engine_symbol(parameters.calendar_symbol)})
-            session.upload(
-                {
-                    "soloFactorSource": source,
-                    "soloFactors": np.asarray(parameters.columns, dtype=str),
-                    "soloReturns": np.asarray(parameters.return_columns, dtype=str),
-                    "soloPeriods": np.asarray([parameters.period], dtype=np.int32),
-                    "soloGroups": np.int32(parameters.groups),
-                    "soloSelect": np.int32(parameters.n_select),
-                    "soloMarketWeight": parameters.weight == "market_value",
-                    "soloSourceCodes": np.asarray([source_symbol(s) for s in codes]),
-                    "soloEngineCodes": np.asarray(codes),
-                    "soloCalendarSymbol": source_symbol(parameters.calendar_symbol),
-                    "soloStart": np.datetime64(parameters.start, "ms"),
-                    # 底层执行统计按半开区间过滤；仅统计上界转换为末日次日。
-                    "soloEnd": np.datetime64(parameters.end, "ms") + np.timedelta64(1, "D"),
-                }
-            )
-            # 仅聚合中反复执行的三个 helper 保留为会话函数；一次性统计直接生成结果表。
-            # 所有顶层临时变量使用 solo 前缀，避免与用户因子列及 SQL 字段混淆。
+            session.upload({
+                "sourceTable": source,
+                "factorColNames": np.asarray(parameters.columns, dtype=str),
+                "returnColNames": np.asarray(parameters.return_columns, dtype=str),
+                "turnoverPeriods": np.asarray([parameters.period], dtype=np.int32),
+                "nGroups": np.int32(parameters.groups),
+                "nSelect": np.int32(parameters.n_select),
+                "marketWeight": parameters.weight == "market_value",
+                "sourceCodes": np.asarray([source_symbol(s) for s in codes]),
+                "engineCodes": np.asarray(codes),
+                "calendarSymbol": source_symbol(parameters.calendar_symbol),
+                "startTime": np.datetime64(parameters.start, "ms"),
+                "endTime": np.datetime64(parameters.end, "ms") + np.timedelta64(1, "D"),
+            })
+            log.info("session.run: 保留共同有效因子并分组")
             session.run(rf"""
-                def soloFactorWeightedReturn(weight, ret) {{
+                def factorWeightedReturn(weight, ret) {{
                     if (any(!isNull(weight) && weight < 0)) {{
                         throw "市值权重不能为负数"
                     }}
@@ -131,7 +114,7 @@ def analyze_factors(
                     return sum(validWeight * validReturn) \ totalWeight
                 }}
 
-                def soloFactorExtremeRanks(values, codes, ascending) {{
+                def factorExtremeRanks(values, codes, ascending) {{
                     ranks = take(long(NULL), size(values))
                     if (size(values) == 0) return ranks
                     ranked = table(
@@ -147,286 +130,300 @@ def analyze_factors(
                     return ranks
                 }}
 
-                def soloFactorExtremeWeightedReturn(
+                def factorExtremeWeightedReturn(
                     factorValue, weight, ret, nSelect, ascending, codes) {{
                     selected = !isNull(factorValue) && (
-                        soloFactorExtremeRanks(factorValue, codes, ascending) < int(nSelect)
+                        factorExtremeRanks(factorValue, codes, ascending) < int(nSelect)
                     )
-                    return soloFactorWeightedReturn(weight[selected], ret[selected])
+                    return factorWeightedReturn(weight[selected], ret[selected])
                 }}
 
                 // 行情、日历及共同非空因子样本。
-                soloCalendar = exec time from {result.data_ref} where code = soloCalendarSymbol
-                if (size(soloCalendar) == 0) throw "缺少交易日历基准行情"
-                soloPrices = select * from {result.data_ref} where time in soloCalendar
-                replaceColumn!(soloPrices, `time, timestamp(soloPrices.time))
-                replaceColumn!(soloFactorSource, `time, timestamp(soloFactorSource.time))
-                replaceColumn!(soloPrices, `code,
-                    dict(soloSourceCodes, soloEngineCodes)[string(soloPrices.code)])
-                soloFactorInput = lj(soloFactorSource, soloPrices, `time`code)
-                if (!soloMarketWeight) {{
-                    soloFactorInput[`circ_mv] = take(1.0, soloFactorInput.rows())
+                calendar = exec time from {result.data_ref} where code = calendarSymbol
+                if (size(calendar) == 0) throw "缺少交易日历基准行情"
+                prices = select * from {result.data_ref} where time in calendar
+                replaceColumn!(prices, `time, timestamp(prices.time))
+                replaceColumn!(sourceTable, `time, timestamp(sourceTable.time))
+                replaceColumn!(prices, `code,
+                    dict(sourceCodes, engineCodes)[string(prices.code)])
+                rawFactorTable = lj(sourceTable, prices, `time`code)
+                if (!marketWeight) {{
+                    rawFactorTable[`circ_mv] = take(1.0, rawFactorTable.rows())
                 }}
-                soloInputColumns = soloFactorInput.columnNames()
-                for (soloColumn in symbol(soloFactors)) {{
-                    if (not(soloColumn in soloInputColumns)) {{
-                        throw "required column is missing: " + string(soloColumn)
+                inputColumns = rawFactorTable.columnNames()
+                for (column in symbol(factorColNames)) {{
+                    if (not(column in inputColumns)) {{
+                        throw "required column is missing: " + string(column)
                     }}
                 }}
-                soloValidMask = take(true, soloFactorInput.rows())
-                for (soloFactorCol in soloFactors) {{
-                    soloValidMask = soloValidMask && !isNull(soloFactorInput[soloFactorCol])
+                validMask = take(true, rawFactorTable.rows())
+                for (factorCol in factorColNames) {{
+                    validMask = validMask && !isNull(rawFactorTable[factorCol])
                 }}
-                soloFactorProcessed = soloFactorInput[soloValidMask]
-                if (soloFactorProcessed.rows() == 0) throw "没有共同有效的因子样本"
+                processedTable = rawFactorTable[validMask]
+                if (processedTable.rows() == 0) throw "没有共同有效的因子样本"
                 // 只有参与分组的有效因子记录需要市值权重。
-                if (soloMarketWeight) {{
-                    if (any(isNull(soloFactorProcessed.circ_mv) || soloFactorProcessed.circ_mv <= 0))
+                if (marketWeight) {{
+                    if (any(isNull(processedTable.circ_mv) || processedTable.circ_mv <= 0))
                         throw "市值加权需要每条有效因子记录具备正数 circ_mv"
                 }}
-                for (soloFactorCol in soloFactors) {{
-                    soloRanks = <select int(floor(
-                        rank(_$soloFactorCol, true, , true, `first, false) * soloGroups
-                        / double(count(_$soloFactorCol))
-                    )) as factor_group from soloFactorProcessed context by time>.eval()
-                    soloFactorProcessed[soloFactorCol + "_group"] = soloRanks.factor_group
+                for (factorCol in factorColNames) {{
+                    ranks = <select int(floor(
+                        rank(_$factorCol, true, , true, `first, false) * nGroups
+                        / double(count(_$factorCol))
+                    )) as factor_group from processedTable context by time>.eval()
+                    processedTable[factorCol + "_group"] = ranks.factor_group
                 }}
 
                 // 后续统计共用的列及分组检查，只检查一次。
-                if (soloGroups < 2) throw "nGroups must be at least 2"
-                if (soloSelect < 1) throw "nSelect must be at least 1"
-                soloProcessedColumns = soloFactorProcessed.columnNames()
-                soloRequiredColumns = symbol(join(["time", "code", "circ_mv"], soloReturns))
-                for (soloColumn in soloRequiredColumns) {{
-                    if (not(soloColumn in soloProcessedColumns)) {{
-                        throw "required column is missing: " + string(soloColumn)
+                if (nGroups < 2) throw "nGroups must be at least 2"
+                if (nSelect < 1) throw "nSelect must be at least 1"
+                processedColumns = processedTable.columnNames()
+                requiredColumns = symbol(join(["time", "code", "circ_mv"], returnColNames))
+                for (column in requiredColumns) {{
+                    if (not(column in processedColumns)) {{
+                        throw "required column is missing: " + string(column)
                     }}
                 }}
-                for (soloFactorCol in soloFactors) {{
-                    soloGroupCol = string(soloFactorCol) + "_group"
-                    soloGroupValues = double(soloFactorProcessed[soloGroupCol])
-                    soloInvalidGroups = !isNull(soloFactorProcessed[soloFactorCol]) && (
-                        isNull(soloGroupValues) || soloGroupValues < 0 ||
-                        soloGroupValues >= soloGroups || soloGroupValues != floor(soloGroupValues)
+                for (factorCol in factorColNames) {{
+                    groupCol = string(factorCol) + "_group"
+                    groupValues = double(processedTable[groupCol])
+                    invalidGroups = !isNull(processedTable[factorCol]) && (
+                        isNull(groupValues) || groupValues < 0 ||
+                        groupValues >= nGroups || groupValues != floor(groupValues)
                     )
-                    if (any(soloInvalidGroups)) {{
-                        soloInvalidSample = soloFactorProcessed[soloInvalidGroups]
-                        soloInvalidSample = soloInvalidSample[0:min(5, soloInvalidSample.rows())]
-                        throw soloGroupCol + " 必须是 [0, " + string(soloGroups - 1) +
-                            "] 内的整数；违规行数=" + string(sum(soloInvalidGroups)) +
-                            "，日期=" + string(soloInvalidSample.time) +
-                            ", code=" + string(soloInvalidSample.code)
+                    if (any(invalidGroups)) {{
+                        invalidSample = processedTable[invalidGroups]
+                        invalidSample = invalidSample[0:min(5, invalidSample.rows())]
+                        throw groupCol + " 必须是 [0, " + string(nGroups - 1) +
+                            "] 内的整数；违规行数=" + string(sum(invalidGroups)) +
+                            "，日期=" + string(invalidSample.time) +
+                            ", code=" + string(invalidSample.code)
                     }}
                 }}
-
+                NULL
+            """)
+            log.info("session.run: 统计因子有效覆盖")
+            session.run(r"""
                 // 执行统计：此 API 没有额外过滤列，唯一阶段为共同因子非空。
-                soloOutputExecutionStatistics = select count(*) as source_count
-                    from soloFactorSource
-                    where time >= soloStart, time < soloEnd, !isNull(code)
+                executionStatistics = select count(*) as source_count
+                    from sourceTable
+                    where time >= startTime, time < endTime, !isNull(code)
                     group by time
-                soloOutputExecutionStatistics.sortBy!(`time)
-                soloFilteredCounts = select count(*) as filtered_count
-                    from soloFactorProcessed
-                    where time >= soloStart, time < soloEnd, !isNull(code)
+                executionStatistics.sortBy!(`time)
+                filteredCounts = select count(*) as filtered_count
+                    from processedTable
+                    where time >= startTime, time < endTime, !isNull(code)
                     group by time
-                soloOutputExecutionStatistics = lj(
-                    soloOutputExecutionStatistics, soloFilteredCounts, `time)
-                soloOutputExecutionStatistics[`filtered_count] = long(
-                    nullFill(soloOutputExecutionStatistics[`filtered_count], 0))
-                soloOutputExecutionStatistics["filter0_name"] = take(
-                    "因子空值", soloOutputExecutionStatistics.rows())
-                soloOutputExecutionStatistics["filter0_count"] =
-                    soloOutputExecutionStatistics[`filtered_count]
-                soloOutputExecutionStatistics[`retention_rate] = iif(
-                    soloOutputExecutionStatistics[`source_count] > 0,
-                    double(soloOutputExecutionStatistics[`filtered_count]) \
-                        double(soloOutputExecutionStatistics[`source_count]),
+                executionStatistics = lj(
+                    executionStatistics, filteredCounts, `time)
+                executionStatistics[`filtered_count] = long(
+                    nullFill(executionStatistics[`filtered_count], 0))
+                executionStatistics["filter0_name"] = take(
+                    "因子空值", executionStatistics.rows())
+                executionStatistics["filter0_count"] =
+                    executionStatistics[`filtered_count]
+                executionStatistics[`retention_rate] = iif(
+                    executionStatistics[`source_count] > 0,
+                    double(executionStatistics[`filtered_count]) \
+                        double(executionStatistics[`source_count]),
                     double(NULL))
-
+                NULL
+            """)
+            log.info("session.run: 计算全部因子的 IC 和 RankIC")
+            session.run(r"""
                 // IC / Rank IC，按时间数值排序，收益 NULL 仍由相关系数聚合处理。
-                soloOutputInformationCoefficient = select distinct(time) as time
-                    from soloFactorProcessed
-                soloOutputInformationCoefficient.sortBy!(`time)
-                for (soloFactorCol in soloFactors) {{
-                    soloFactorSym = symbol([string(soloFactorCol)])[0]
-                    for (soloRetCol in soloReturns) {{
-                        soloRetSym = symbol([string(soloRetCol)])[0]
-                        soloCorrTable = sql(
+                informationCoefficient = select distinct(time) as time
+                    from processedTable
+                informationCoefficient.sortBy!(`time)
+                for (factorCol in factorColNames) {
+                    factorSym = symbol([string(factorCol)])[0]
+                    for (retCol in returnColNames) {
+                        retSym = symbol([string(retCol)])[0]
+                        corrTable = sql(
                             [
                                 sqlCol(`time, , `time),
                                 sqlColAlias(makeCall(
-                                    corr, sqlCol(soloFactorSym), sqlCol(soloRetSym)), `ic),
+                                    corr, sqlCol(factorSym), sqlCol(retSym)), `ic),
                                 sqlColAlias(makeCall(
-                                    spearmanr, sqlCol(soloFactorSym), sqlCol(soloRetSym)), `rank_ic)
+                                    spearmanr, sqlCol(factorSym), sqlCol(retSym)), `rank_ic)
                             ],
-                            soloFactorProcessed, , [sqlCol(`time)]
+                            processedTable, , [sqlCol(`time)]
                         ).eval()
-                        soloOutputInformationCoefficient = lj(
-                            soloOutputInformationCoefficient, soloCorrTable, `time)
-                        soloOutputInformationCoefficient.rename!(
-                            `ic, symbol([string(soloFactorCol) + "_" + string(soloRetCol) + "_ic"])[0])
-                        soloOutputInformationCoefficient.rename!(
+                        informationCoefficient = lj(
+                            informationCoefficient, corrTable, `time)
+                        informationCoefficient.rename!(
+                            `ic, symbol([string(factorCol) + "_" + string(retCol) + "_ic"])[0])
+                        informationCoefficient.rename!(
                             `rank_ic,
-                            symbol([string(soloFactorCol) + "_" + string(soloRetCol) + "_rank_ic"])[0])
-                    }}
-                }}
-
+                            symbol([string(factorCol) + "_" + string(retCol) + "_rank_ic"])[0])
+                    }
+                }
+                NULL
+            """)
+            log.info("session.run: 计算分组与极端组合对数收益")
+            session.run(r"""
                 // 分组与独立极端组合对数收益不预平滑；全交易日轴保留无共同因子日期及收益 NULL。
                 // 极端选择先按因子、证券码排序，再处理收益 NULL。
-                soloOutputGroupReturns = table(sort(distinct(timestamp(soloCalendar))) as time)
-                soloOutputGroupReturns.sortBy!(`time)
-                for (soloFactorCol in soloFactors) {{
-                    soloFactorSym = symbol([string(soloFactorCol)])[0]
-                    soloGroupCol = string(soloFactorCol) + "_group"
-                    soloGroupSym = symbol([soloGroupCol])[0]
-                    for (soloRetCol in soloReturns) {{
-                        soloRetSym = symbol([string(soloRetCol)])[0]
-                        soloExtremes = sql(
+                groupReturns = table(sort(distinct(timestamp(calendar))) as time)
+                groupReturns.sortBy!(`time)
+                for (factorCol in factorColNames) {
+                    factorSym = symbol([string(factorCol)])[0]
+                    groupCol = string(factorCol) + "_group"
+                    groupSym = symbol([groupCol])[0]
+                    for (retCol in returnColNames) {
+                        retSym = symbol([string(retCol)])[0]
+                        extremes = sql(
                             [
                                 sqlCol(`time, , `time),
                                 sqlColAlias(makeCall(
-                                    soloFactorExtremeWeightedReturn,
-                                    sqlCol(soloFactorSym), sqlCol(`circ_mv), sqlCol(soloRetSym),
-                                    soloSelect, true, sqlCol(`code)), `bottom_ret),
+                                    factorExtremeWeightedReturn,
+                                    sqlCol(factorSym), sqlCol(`circ_mv), sqlCol(retSym),
+                                    nSelect, true, sqlCol(`code)), `bottom_ret),
                                 sqlColAlias(makeCall(
-                                    soloFactorExtremeWeightedReturn,
-                                    sqlCol(soloFactorSym), sqlCol(`circ_mv), sqlCol(soloRetSym),
-                                    soloSelect, false, sqlCol(`code)), `top_ret)
+                                    factorExtremeWeightedReturn,
+                                    sqlCol(factorSym), sqlCol(`circ_mv), sqlCol(retSym),
+                                    nSelect, false, sqlCol(`code)), `top_ret)
                             ],
-                            soloFactorProcessed, , [sqlCol(`time)]
+                            processedTable, , [sqlCol(`time)]
                         ).eval()
-                        soloBottomRows = select time, bottom_ret as ret from soloExtremes
-                        soloOutputGroupReturns = lj(soloOutputGroupReturns, soloBottomRows, `time)
-                        soloOutputGroupReturns.rename!(
+                        bottomRows = select time, bottom_ret as ret from extremes
+                        groupReturns = lj(groupReturns, bottomRows, `time)
+                        groupReturns.rename!(
                             `ret,
-                            symbol([string(soloFactorCol) + "_" + string(soloRetCol) + "_bottom"])[0])
-                        for (soloGroupId in 0 .. (soloGroups - 1)) {{
-                            soloWeighted = sql(
+                            symbol([string(factorCol) + "_" + string(retCol) + "_bottom"])[0])
+                        for (groupId in 0 .. (nGroups - 1)) {
+                            weighted = sql(
                                 [
                                     sqlCol(`time, , `time),
                                     sqlColAlias(makeCall(
-                                        soloFactorWeightedReturn,
-                                        sqlCol(`circ_mv), sqlCol(soloRetSym)), `ret)
+                                        factorWeightedReturn,
+                                        sqlCol(`circ_mv), sqlCol(retSym)), `ret)
                                 ],
-                                soloFactorProcessed,
-                                expr(sqlCol(soloGroupSym), ==, soloGroupId), [sqlCol(`time)]
+                                processedTable,
+                                expr(sqlCol(groupSym), ==, groupId), [sqlCol(`time)]
                             ).eval()
-                            soloOutputGroupReturns = lj(soloOutputGroupReturns, soloWeighted, `time)
-                            soloOutputGroupReturns.rename!(
-                                `ret, symbol([string(soloFactorCol) + "_" + string(soloRetCol) +
-                                    "_group" + string(soloGroupId)])[0])
-                        }}
-                        soloTopRows = select time, top_ret as ret from soloExtremes
-                        soloOutputGroupReturns = lj(soloOutputGroupReturns, soloTopRows, `time)
-                        soloOutputGroupReturns.rename!(
+                            groupReturns = lj(groupReturns, weighted, `time)
+                            groupReturns.rename!(
+                                `ret, symbol([string(factorCol) + "_" + string(retCol) +
+                                    "_group" + string(groupId)])[0])
+                        }
+                        topRows = select time, top_ret as ret from extremes
+                        groupReturns = lj(groupReturns, topRows, `time)
+                        groupReturns.rename!(
                             `ret,
-                            symbol([string(soloFactorCol) + "_" + string(soloRetCol) + "_top"])[0])
-                    }}
-                }}
-
-                // 换手与秩自相关使用完整交易日历，以及唯一持有期 soloPeriods=[period]。
-                soloPeriodValues = sort(distinct(int(soloPeriods)))
-                if (size(soloPeriodValues) == 0 || any(soloPeriodValues < 1)) {{
+                            symbol([string(factorCol) + "_" + string(retCol) + "_top"])[0])
+                    }
+                }
+                NULL
+            """)
+            log.info("session.run: 计算分组换手率与秩自相关")
+            session.run(r"""
+                // 换手与秩自相关使用完整交易日历，以及唯一持有期 turnoverPeriods=[period]。
+                periodValues = sort(distinct(int(turnoverPeriods)))
+                if (size(periodValues) == 0 || any(periodValues < 1)) {
                     throw "turnoverPeriods must contain positive integers"
-                }}
-                soloFactorDates = table(sort(distinct(timestamp(soloCalendar))) as time)
-                soloFactorDates.sortBy!(`time)
-                soloGroupColumns = "group" + string(0 .. (soloGroups - 1))
-                soloOutputGroupTurnover = table(
+                }
+                factorDates = table(sort(distinct(timestamp(calendar))) as time)
+                factorDates.sortBy!(`time)
+                groupColumns = "group" + string(0 .. (nGroups - 1))
+                groupTurnover = table(
                     array(TIMESTAMP, 0) as time,
                     array(STRING, 0) as factor,
                     array(INT, 0) as periods,
                     array(DOUBLE, 0) as rank_autocorrelation
                 )
-                addColumn(soloOutputGroupTurnover, ["bottom"], take(DOUBLE, 1))
-                addColumn(soloOutputGroupTurnover, soloGroupColumns, take(DOUBLE, soloGroups))
-                addColumn(soloOutputGroupTurnover, ["top"], take(DOUBLE, 1))
-                for (soloFactorCol in soloFactors) {{
-                    soloGroupCol = string(soloFactorCol) + "_group"
-                    soloFactorMembers = <select
+                addColumn(groupTurnover, ["bottom"], take(DOUBLE, 1))
+                addColumn(groupTurnover, groupColumns, take(DOUBLE, nGroups))
+                addColumn(groupTurnover, ["top"], take(DOUBLE, 1))
+                for (factorCol in factorColNames) {
+                    groupCol = string(factorCol) + "_group"
+                    factorMembers = <select
                             timestamp(time) as time,
                             string(code) as code,
-                            double(_$soloFactorCol) as factor_value
-                        from soloFactorProcessed
-                        where !isNull(_$soloFactorCol)>.eval()
-                    if (soloFactorDates.rows() > 0) {{
-                        soloFactorMembers = select distinct time, code, factor_value
-                            from soloFactorMembers
-                        soloGroupMembers = <select
+                            double(_$factorCol) as factor_value
+                        from processedTable
+                        where !isNull(_$factorCol)>.eval()
+                    if (factorDates.rows() > 0) {
+                        factorMembers = select distinct time, code, factor_value
+                            from factorMembers
+                        groupMembers = <select
                                 timestamp(time) as time,
                                 string(code) as code,
-                                int(_$soloGroupCol) as group_id
-                            from soloFactorProcessed
-                            where !isNull(_$soloFactorCol), !isNull(_$soloGroupCol)>.eval()
-                        soloGroupMembers = select distinct time, code, group_id from soloGroupMembers
-                        soloRanks = select time, code,
+                                int(_$groupCol) as group_id
+                            from processedTable
+                            where !isNull(_$factorCol), !isNull(_$groupCol)>.eval()
+                        groupMembers = select distinct time, code, group_id from groupMembers
+                        ranks = select time, code,
                                 rank(factor_value, true, , true, `average, false) as factor_rank
-                            from soloFactorMembers context by time
-                        soloExtremeRanks = select time, code,
-                                soloFactorExtremeRanks(factor_value, code, true) as bottom_rank,
-                                soloFactorExtremeRanks(factor_value, code, false) as top_rank
-                            from soloFactorMembers context by time
-                        soloPortfolioMembers = select time, code, int(group_id + 1) as portfolio_id
-                            from soloGroupMembers
-                        soloBottomMembers = select time, code, int(0) as portfolio_id
-                            from soloExtremeRanks where bottom_rank < int(soloSelect)
-                        soloTopMembers = select time, code, int(soloGroups + 1) as portfolio_id
-                            from soloExtremeRanks where top_rank < int(soloSelect)
-                        soloPortfolioMembers = unionAll(soloPortfolioMembers, soloBottomMembers)
-                        soloPortfolioMembers = unionAll(soloPortfolioMembers, soloTopMembers)
-                        for (soloPeriod in soloPeriodValues) {{
-                            soloRankDateMap = select time, move(time, soloPeriod) as previous_time
-                                from soloFactorDates
-                            soloCurrentRanks = lj(soloRanks, soloRankDateMap, `time)
-                            soloPreviousRanks = select time as previous_time, code,
-                                    factor_rank as previous_rank from soloRanks
-                            soloRankPairs = lj(
-                                soloCurrentRanks, soloPreviousRanks, ["previous_time", "code"])
-                            soloRankRows = select corr(factor_rank, previous_rank) as rank_autocorrelation
-                                from soloRankPairs where !isNull(previous_rank) group by time
-                            soloCurrentMembers = lj(soloPortfolioMembers, soloRankDateMap, `time)
-                            soloPreviousMembers = select time as previous_time, code, portfolio_id,
-                                    true as retained from soloPortfolioMembers
-                            soloMatchedMembers = lj(
-                                soloCurrentMembers, soloPreviousMembers,
+                            from factorMembers context by time
+                        extremeRanks = select time, code,
+                                factorExtremeRanks(factor_value, code, true) as bottom_rank,
+                                factorExtremeRanks(factor_value, code, false) as top_rank
+                            from factorMembers context by time
+                        portfolioMembers = select time, code, int(group_id + 1) as portfolio_id
+                            from groupMembers
+                        bottomMembers = select time, code, int(0) as portfolio_id
+                            from extremeRanks where bottom_rank < int(nSelect)
+                        topMembers = select time, code, int(nGroups + 1) as portfolio_id
+                            from extremeRanks where top_rank < int(nSelect)
+                        portfolioMembers = unionAll(portfolioMembers, bottomMembers)
+                        portfolioMembers = unionAll(portfolioMembers, topMembers)
+                        for (period in periodValues) {
+                            rankDateMap = select time, move(time, period) as previous_time
+                                from factorDates
+                            currentRanks = lj(ranks, rankDateMap, `time)
+                            previousRanks = select time as previous_time, code,
+                                    factor_rank as previous_rank from ranks
+                            rankPairs = lj(
+                                currentRanks, previousRanks, ["previous_time", "code"])
+                            rankRows = select corr(factor_rank, previous_rank) as rank_autocorrelation
+                                from rankPairs where !isNull(previous_rank) group by time
+                            currentMembers = lj(portfolioMembers, rankDateMap, `time)
+                            previousMembers = select time as previous_time, code, portfolio_id,
+                                    true as retained from portfolioMembers
+                            matchedMembers = lj(
+                                currentMembers, previousMembers,
                                 ["previous_time", "code", "portfolio_id"])
-                            soloTurnoverRows = select
+                            turnoverRows = select
                                     1.0 - sum(iif(isNull(retained), 0, 1)) \ count(*) as turnover
-                                from soloMatchedMembers
+                                from matchedMembers
                                 where !isNull(previous_time) group by time, portfolio_id
-                            soloPeriodResult = select time from soloFactorDates
-                            soloPeriodResult["factor"] = take(string(soloFactorCol), soloPeriodResult.rows())
-                            soloPeriodResult["periods"] = take(int(soloPeriod), soloPeriodResult.rows())
-                            soloPeriodResult = lj(soloPeriodResult, soloRankRows, `time)
-                            for (soloPortfolioId in 0 .. (soloGroups + 1)) {{
-                                soloPortfolioRows = select time, turnover from soloTurnoverRows
-                                    where portfolio_id == soloPortfolioId
-                                if (soloPortfolioId == 0) {{
-                                    soloPortfolioColumn = `bottom
-                                }} else if (soloPortfolioId == soloGroups + 1) {{
-                                    soloPortfolioColumn = `top
-                                }} else {{
-                                    soloPortfolioColumn = symbol(["group" + string(soloPortfolioId - 1)])[0]
-                                }}
-                                soloPortfolioRows.rename!(`turnover, soloPortfolioColumn)
-                                soloPeriodResult = lj(soloPeriodResult, soloPortfolioRows, `time)
-                            }}
-                            soloOutputGroupTurnover = unionAll(soloOutputGroupTurnover, soloPeriodResult)
-                        }}
-                    }}
-                }}
-                soloOutputGroupTurnover.sortBy!(`factor`periods`time)
+                            periodResult = select time from factorDates
+                            periodResult["factor"] = take(string(factorCol), periodResult.rows())
+                            periodResult["periods"] = take(int(period), periodResult.rows())
+                            periodResult = lj(periodResult, rankRows, `time)
+                            for (portfolioId in 0 .. (nGroups + 1)) {
+                                portfolioRows = select time, turnover from turnoverRows
+                                    where portfolio_id == portfolioId
+                                if (portfolioId == 0) {
+                                    portfolioColumn = `bottom
+                                } else if (portfolioId == nGroups + 1) {
+                                    portfolioColumn = `top
+                                } else {
+                                    portfolioColumn = symbol(["group" + string(portfolioId - 1)])[0]
+                                }
+                                portfolioRows.rename!(`turnover, portfolioColumn)
+                                periodResult = lj(periodResult, portfolioRows, `time)
+                            }
+                            groupTurnover = unionAll(groupTurnover, periodResult)
+                        }
+                    }
+                }
+                groupTurnover.sortBy!(`factor`periods`time)
+                NULL
             """)
             report = FactorAnalysisResult(
                 parameters=parameters.model_copy(deep=True),
-                processed_data=session.run("soloFactorProcessed"),
-                execution_statistics=session.run("soloOutputExecutionStatistics"),
-                information_coefficient=session.run("soloOutputInformationCoefficient"),
-                group_returns=session.run("soloOutputGroupReturns"),
-                group_turnover=session.run("soloOutputGroupTurnover"),
+                processed_data=session.run("processedTable"),
+                execution_statistics=session.run("executionStatistics"),
+                information_coefficient=session.run("informationCoefficient"),
+                group_returns=session.run("groupReturns"),
+                group_turnover=session.run("groupTurnover"),
             )
-    log.info(
-        "因子分析完成：有效样本 {} 条，总用时 {:.1f} 秒",
-        len(report.processed_data), perf_counter() - started,
-    )
+    log.success("因子分析完成：输入 {} 行，有效 {} 行，{} 个交易日，各收益有效样本={}",
+                len(source), len(report.processed_data), len(report.execution_statistics),
+                report.processed_data[parameters.return_columns].notna().sum().to_dict())
+    if len(report.processed_data) < len(source):
+        log.warning("共同有效样本剔除 {} 行，不填补无效因子值", len(source) - len(report.processed_data))
     return report

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from packaging.version import Version
 from pydantic import BaseModel
+from runtime.utils import logger as log
 
 from scheme.base import (
     Algo,
@@ -16,7 +17,6 @@ from scheme.base import (
     ResearchContext,
     StrategyAnalysisParams,
 )
-from scheme.log import get_logger
 
 if TYPE_CHECKING:
     from scheme.config import DolphinSettings
@@ -31,8 +31,6 @@ BASES = {
 }
 
 __all__ = ["algo_options"]
-
-log = get_logger("scheme.research")
 
 A = TypeVar("A", bound=BaseModel)
 P = TypeVar("P", bound=BaseModel)

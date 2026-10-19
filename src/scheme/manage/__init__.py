@@ -5,13 +5,12 @@ import json
 import sys
 from importlib import import_module
 from pathlib import Path
-from time import perf_counter
 
-from scheme.log import duration, get_logger
+from runtime.utils import logger as log
+
+from scheme._errors import error_text
 
 TASK_KINDS = ("factor", "model", "optimize", "control", "execution", "strategy")
-
-log = get_logger("scheme.task")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -50,15 +49,18 @@ def main(argv: list[str] | None = None) -> int:
         if output != arguments.output.resolve():
             raise ValueError("输出目录与 input.output 不一致")
         data["output"] = str(output)
-        started = perf_counter()
-        log.info("正式任务开始：{}，输入 {}", kind, input_file)
+        components = [data["factor"]] if kind == "factor" else [item for item in data["algos"].values() if item]
+        log.info("任务 {}：类型={}，组件={}，输出={}",
+                 input_file.parent.name, kind,
+                 "; ".join(f"{item['package']} {item['version']} ({item['entry']})" for item in components),
+                 output)
         code = import_module(f"scheme.execute.{kind}.task").run(data)
-        log.info("正式任务完成：{}，用时 {}", kind, duration(perf_counter() - started))
+        log.success("正式任务完成：{}，输出 {}", kind, output)
         return code
     except Exception as error:
         if arguments.command == "run":
             # 正式任务的错误连同 traceback 进入调度日志；parameters 的 stderr 仍是单行错误协议。
-            log.opt(exception=error).error("正式任务失败：{}: {}", type(error).__name__, error)
+            log.error("正式任务失败：{}", error_text(error, traceback=True))
         else:
             print(f"{type(error).__name__}: {error}", file=sys.stderr)
         return 1

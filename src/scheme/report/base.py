@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import ClassVar, Literal
 
 import pandas as pd
+from runtime.utils import logger as log
 
 
 @dataclass
@@ -62,12 +63,17 @@ class Report:
     def save(self, output: Path) -> list[Path]:
         output.mkdir(parents=True, exist_ok=True)
         paths = []
-        for name, filename in self.filenames.items():
+        for index, (name, filename) in enumerate(self.filenames.items(), 1):
             destination = output / filename
             temporary = destination.with_suffix(".parquet.tmp")
-            getattr(self, name).to_parquet(temporary, index=False)
+            frame = getattr(self, name)
+            log.debug("写入 Parquet：{}，{} 行、{} 列", destination, len(frame), len(frame.columns))
+            frame.to_parquet(temporary, index=False)
             temporary.replace(destination)
             paths.append(destination)
+            log.info("保存报告 {}/{}：{}，{} 行、{} 列，{} 字节",
+                     index, len(self.filenames), filename, len(frame), len(frame.columns),
+                     destination.stat().st_size)
         return paths
 
     def preview(self, name: str, rows: int = 20) -> pd.DataFrame:
