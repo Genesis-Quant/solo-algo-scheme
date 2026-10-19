@@ -132,7 +132,7 @@ def preprocess(
             row_count, times, codes = session.run(
                 f"[{data}.rows(), sort(distinct({data}.time)), distinct({data}.code)]"
             )
-            dates = pd.DatetimeIndex(times)
+            dates = pd.DatetimeIndex(times).unique().sort_values()
         if not row_count:
             raise ValueError("preprocess input must not be empty")
         if dates.hasnans or dates.tz is not None or not dates.equals(dates.normalize()):
@@ -236,10 +236,11 @@ def preprocess(
                 if is_variable:
                     # DosVar 沿用 DolphinDB 的 double 转换，不经 pandas 重新解析。
                     batch = session.run(f"""
-                        sql(sqlCol(`time`code) join sqlCol(
+                        sql(sqlCol(`time, timestamp, `time) join sqlCol(`code) join sqlCol(
                                 symbol({json.dumps(selected, ensure_ascii=False)}), double,
                                 symbol({json.dumps(selected, ensure_ascii=False)})), {data},
-                            [<time >= {begin:%Y.%m.%d}>, <time < {end:%Y.%m.%d}>]).eval()
+                            [<timestamp(time) >= {begin:%Y.%m.%d}>,
+                             <timestamp(time) < {end:%Y.%m.%d}>]).eval()
                     """)
                 else:
                     mask = (input_dates >= begin) & (input_dates < end)

@@ -54,7 +54,7 @@ def query(
     )
     try:
         if owns_session:
-            session = open_session(settings, max_time=3600)
+            session = open_session(settings)
         else:
             _runtime.redirect_session_output(session)
             log.debug("查询复用调用方连接：{}:{}，{}/{}",
