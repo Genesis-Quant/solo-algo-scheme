@@ -1,7 +1,9 @@
-"""因子预处理；暴露独立查询，DOS 直接使用 Arena 的变量和计算步骤。"""
+"""按完整交易日分批预处理，暴露仍按原完整区间独立查询。"""
 
+import json
 import re
 from collections.abc import Sequence
+from datetime import timedelta
 
 import numpy as np
 import pandas as pd
@@ -71,7 +73,7 @@ def preprocess(
     industry_column: str = "industry_l0",
     settings: DolphinSettings | None = None,
 ) -> pd.DataFrame:
-    """逐因子执行 3MAD、标准化、行业及 log 市值回归，保留输入键和无效值。"""
+    """逐日中性化；每批保留完整截面，不切割证券域或重置暴露填充。"""
     for value, label in ((market_value_column, "market_value_column"),
                          (industry_column, "industry_column")):
         _name(value, label)
@@ -103,9 +105,15 @@ def preprocess(
         for column in selected:
             if pd.api.types.is_bool_dtype(frame[column]) or pd.api.types.is_complex_dtype(frame[column]):
                 raise ValueError("factor columns must be real numeric values")
+            # pandas 的转换可能依赖整列类型推断，不能拆批后再转换。
             frame[column] = pd.to_numeric(frame[column], errors="raise").astype(float)
         if frame[selected].isna().all().all():
             raise ValueError("preprocess factors are all NULL")
+        input_dates = pd.DatetimeIndex(frame["time"])
+        dates = input_dates.unique().sort_values()
+        codes = frame["code"].unique().tolist()
+        row_count = len(frame)
+        del expected
 
     settings = settings if settings is not None else DolphinSettings.from_env()
     owns_session = session is None
@@ -121,149 +129,167 @@ def preprocess(
             factor_types = metadata.set_index("name").loc[selected, "typeString"]
             if factor_types.str.upper().str.startswith(("BOOL", "COMPLEX")).any():
                 raise ValueError("factor columns must be real numeric values")
-            expected = _keys(session.run(f"select time, code from {data}"))
-        normalized = expected.assign(code=expected["code"].map(source_symbol))
+            row_count, times, codes = session.run(
+                f"[{data}.rows(), sort(distinct({data}.time)), distinct({data}.code)]"
+            )
+            dates = pd.DatetimeIndex(times)
+        if not row_count:
+            raise ValueError("preprocess input must not be empty")
+        if dates.hasnans or dates.tz is not None or not dates.equals(dates.normalize()):
+            raise ValueError("time must contain non-NULL, timezone-naive calendar dates")
+        if not all(isinstance(code, str) and bool(code.strip()) for code in codes):
+            raise ValueError("code must contain nonempty strings")
         request = {
-            "start_date": expected["time"].min().date().isoformat(),
-            "end_date": expected["time"].max().date().isoformat(),
-            "codes": sorted(normalized["code"].unique().tolist()),
+            "start_date": dates[0].date().isoformat(),
+            "end_date": dates[-1].date().isoformat(),
+            "codes": sorted({source_symbol(code) for code in codes}),
             "factors": [market_value_column, industry_column],
         }
-        log.info("因子预处理：{}，{} 行、{} 只股票；独立查询 {} 和 {}",
-                 selected, len(expected), len(request["codes"]), market_value_column, industry_column)
-        with query(request, settings=settings) as result:
-            exposure = result.data
-        if (not isinstance(exposure, pd.DataFrame)
-                or not set(_KEYS + request["factors"]) <= set(exposure.columns)):
-            raise ValueError("exposure query did not return the requested columns")
-        if not exposure.empty:
-            _keys(exposure)
-        exposure["time"] = pd.to_datetime(exposure["time"]).astype("datetime64[ns]")
-        exposure["code"] = exposure["code"].map(source_symbol)
-        exposure = normalized.merge(
-            exposure[_KEYS + request["factors"]], how="left", on=_KEYS,
-            sort=False, validate="one_to_one",
-        )
-        exposure["code"] = expected["code"].to_numpy()
-        missing_industry = int(exposure[industry_column].isna().sum())
-        missing_market_value = int(exposure[market_value_column].isna().sum())
+        log.info("因子预处理：{}，{} 行、{} 只股票、{} 个交易日；每批最多 64 个完整交易日",
+                 selected, row_count, len(request["codes"]), len(dates))
+        panels = []
+        has_values = False
+        missing_industry = missing_market_value = 0
+        with query(request, settings=settings) as exposure_result:
+            # 函数参数与工作变量只在当前批次内存活，不占用或覆盖调用方的表变量。
+            session.run(r"""
+                def factorZScore(values) {
+                    valueStd = stdp(values)
+                    if (!isValid(valueStd) || valueStd == 0) return take(double(NULL), size(values))
+                    return (values - avg(values)) \ valueStd
+                }
+                def factorClipMad(values) {
+                    valueMedian = median(values)
+                    mad = median(abs(values - valueMedian))
+                    if (!isValid(mad) || mad == 0) return values
+                    return values.clip(valueMedian - 3 * mad, valueMedian + 3 * mad)
+                }
+                def factorPreprocess(mutable workingTable, factorCols, mktmvCol, industryCol) {
+                    replaceColumn!(workingTable, `time, timestamp(workingTable.time))
+                    replaceColumn!(workingTable, `code, string(workingTable.code))
+                    workingTable.sortBy!(`time`code)
+                    addColumn(workingTable, `factor_preprocess_row_id, LONG)
+                    update workingTable set factor_preprocess_row_id = long(0 .. (workingTable.rows() - 1))
+                    processedTable = select time, code from workingTable
+                    hasValues = false
+                    for (factorCol in factorCols) {
+                        if (any(isValid(double(workingTable[factorCol])))) hasValues = true
+                        processedTable[factorCol] = take(double(NULL), workingTable.rows())
+                    }
+                    dates = sort(distinct(workingTable.time))
+                    for (currentDate in dates) {
+                        crossSection = select * from workingTable where time = currentDate
+                        crossSection.sortBy!(`code)
+                        for (factorCol in factorCols) {
+                            factorColSym = symbol([string(factorCol)])[0]
+                            rawFactor = double(crossSection[factorColSym])
+                            rawMarketValue = double(crossSection[mktmvCol])
+                            rawIndustry = string(crossSection[industryCol])
+                            validMask = isValid(rawFactor) && isValid(rawMarketValue) && isValid(rawIndustry)
+                            if (sum(validMask) == 0) continue
+                            rowIds = crossSection.factor_preprocess_row_id[validMask]
+                            marketValue = rawMarketValue[validMask]
+                            marketValue = iif(marketValue < 1, 1.0, marketValue)
+                            mv = factorZScore(log(marketValue))
+                            industryValues = rawIndustry[validMask]
+                            y = factorZScore(factorClipMad(rawFactor[validMask]))
+                            regressionMask = isValid(y) && isValid(mv)
+                            if (sum(regressionMask) == 0) continue
+                            rowIds = rowIds[regressionMask]
+                            y = y[regressionMask]
+                            mv = mv[regressionMask]
+                            industryValues = industryValues[regressionMask]
+                            industries = sort(distinct(industryValues))
+                            x = matrix(mv)
+                            if (size(industries) > 1) {
+                                for (i in 1 .. (size(industries) - 1)) {
+                                    x = x join matrix(double(industryValues == industries[i]))
+                                }
+                            }
+                            design = matrix(take(1.0, size(y))) join x
+                            singularValues = svd(design, false, false)
+                            rankTolerance = max(singularValues) * max([rows(design), cols(design)]) * 2.220446049250313e-16
+                            effectiveRank = sum(singularValues > rankTolerance)
+                            if (size(y) <= effectiveRank) continue
+                            beta = ols(y, x, true, 0, "svd")
+                            fitted = beta[0] + beta[1] * mv
+                            if (size(industries) > 1) {
+                                for (i in 1 .. (size(industries) - 1)) {
+                                    fitted += beta[i + 1] * flatten(x[, i])
+                                }
+                            }
+                            rawResidual = y - fitted
+                            residualTolerance = max(abs(y)) * max([rows(design), cols(design)]) * 2.220446049250313e-16
+                            if (!isValid(stdp(rawResidual)) || stdp(rawResidual) <= residualTolerance) continue
+                            residual = factorZScore(rawResidual)
+                            processedValues = processedTable[factorColSym]
+                            processedValues[rowIds] = residual
+                            processedTable[factorColSym] = processedValues
+                        }
+                    }
+                    return [processedTable, hasValues]
+                }
+            """)
+            for offset in range(0, len(dates), 64):
+                begin = dates[offset]
+                end = dates[offset + 64] if offset + 64 < len(dates) else dates[-1] + timedelta(days=1)
+                if is_variable:
+                    # DosVar 沿用 DolphinDB 的 double 转换，不经 pandas 重新解析。
+                    batch = session.run(f"""
+                        sql(sqlCol(`time`code) join sqlCol(
+                                symbol({json.dumps(selected, ensure_ascii=False)}), double,
+                                symbol({json.dumps(selected, ensure_ascii=False)})), {data},
+                            [<time >= {begin:%Y.%m.%d}>, <time < {end:%Y.%m.%d}>]).eval()
+                    """)
+                else:
+                    mask = (input_dates >= begin) & (input_dates < end)
+                    batch = frame.loc[mask].copy()
+                expected = _keys(batch)
+                exposure = exposure_result.session.run(f"""
+                    select * from {exposure_result.data_ref}
+                    where time >= {begin:%Y.%m.%d}, time < {end:%Y.%m.%d}
+                """)
+                if not exposure.empty:
+                    _keys(exposure)
+                exposure["time"] = pd.to_datetime(exposure["time"]).astype("datetime64[ns]")
+                exposure["code"] = exposure["code"].map(source_symbol)
+                aligned = expected.assign(code=expected["code"].map(source_symbol)).merge(
+                    exposure, how="left", on=_KEYS, sort=False, validate="one_to_one",
+                )
+                batch["time"] = expected["time"].to_numpy(dtype="datetime64[ms]")
+                batch["code"] = expected["code"].to_numpy()
+                for column in request["factors"]:
+                    batch[column] = aligned[column].to_numpy()
+                missing_industry += int(batch[industry_column].isna().sum())
+                missing_market_value += int(batch[market_value_column].isna().sum())
+                processed, valid = session.run(
+                    "factorPreprocess", batch, np.asarray(selected, dtype=str),
+                    market_value_column, industry_column,
+                )
+                has_values = has_values or bool(valid)
+                keys = _keys(processed)
+                if len(processed) != len(expected) or not set(selected) <= set(processed.columns):
+                    raise ValueError("DolphinDB preprocess changed the input shape")
+                expected_index = pd.MultiIndex.from_arrays(
+                    [expected["time"], expected["code"].map(engine_symbol)], names=["date", "symbol"],
+                )
+                panel = processed[selected].astype(float).copy()
+                panel.index = pd.MultiIndex.from_arrays(
+                    [keys["time"], keys["code"].map(engine_symbol)], names=expected_index.names,
+                )
+                if not panel.index.sort_values().equals(expected_index.sort_values()):
+                    raise ValueError("DolphinDB preprocess changed the input time/code keys")
+                panels.append(panel)
+                log.info("因子中性化：{}/{} 个交易日，当前批次 {} 行，因子={}",
+                         min(offset + 64, len(dates)), len(dates), len(panel), selected)
+        if not has_values:
+            raise ValueError("preprocess factors are all NULL")
+        panel = pd.concat(panels).sort_index()
+        if len(panel) != row_count:
+            raise ValueError("DolphinDB preprocess changed the input row count")
         if missing_industry or missing_market_value:
             log.warning("暴露缺失：行业 {}/{} 行，市值 {}/{} 行；对应输出保留 NULL",
-                        missing_industry, len(exposure), missing_market_value, len(exposure))
-        exposure["time"] = exposure["time"].to_numpy(dtype="datetime64[ms]")
-        session.upload({
-            "factorCols": np.asarray(selected, dtype=str),
-            "mktmvCol": market_value_column,
-            "industryCol": industry_column,
-            "exposure": exposure,
-        })
-        if frame is not None:
-            session.upload({"rawFactorTable": frame})
-        source = data if is_variable else "rawFactorTable"
-        log.debug("session.run: 拼接因子与暴露，不修改输入表")
-        session.run(f"""
-            workingTable = sql(sqlCol(symbol(["time", "code"] join factorCols)), {source}).eval()
-            replaceColumn!(workingTable, `time, timestamp(workingTable.time))
-            replaceColumn!(workingTable, `code, string(workingTable.code))
-            workingTable = lj(workingTable, exposure, `time`code)
-            workingTable.sortBy!(`time`code)
-            addColumn(workingTable, `factor_preprocess_row_id, LONG)
-            update workingTable set factor_preprocess_row_id = long(0 .. (workingTable.rows() - 1))
-            processedTable = select time, code from workingTable
-            hasValues = false
-            for (factorCol in factorCols) {{
-                if (any(isValid(double(workingTable[factorCol])))) hasValues = true
-                processedTable[factorCol] = take(double(NULL), workingTable.rows())
-            }}
-            if (!hasValues) throw "preprocess factors are all NULL"
-        """)
-        log.info("执行 MAD 去极值、标准化和行业、市值中性化：{} 个交易日",
-                 expected["time"].nunique())
-        result = session.run(r"""
-            def factorZScore(values) {
-                valueStd = stdp(values)
-                if (!isValid(valueStd) || valueStd == 0) return take(double(NULL), size(values))
-                return (values - avg(values)) \ valueStd
-            }
-            def factorClipMad(values) {
-                valueMedian = median(values)
-                mad = median(abs(values - valueMedian))
-                if (!isValid(mad) || mad == 0) return values
-                return values.clip(valueMedian - 3 * mad, valueMedian + 3 * mad)
-            }
-            dates = sort(distinct(workingTable.time))
-            dateIndex = 0
-            for (currentDate in dates) {
-                crossSection = select * from workingTable where time = currentDate
-                crossSection.sortBy!(`code)
-                for (factorCol in factorCols) {
-                    factorColSym = symbol([string(factorCol)])[0]
-                    rawFactor = double(crossSection[factorColSym])
-                    rawMarketValue = double(crossSection[mktmvCol])
-                    rawIndustry = string(crossSection[industryCol])
-                    validMask = isValid(rawFactor) && isValid(rawMarketValue) && isValid(rawIndustry)
-                    if (sum(validMask) == 0) continue
-                    rowIds = crossSection.factor_preprocess_row_id[validMask]
-                    marketValue = rawMarketValue[validMask]
-                    marketValue = iif(marketValue < 1, 1.0, marketValue)
-                    mv = factorZScore(log(marketValue))
-                    industryValues = rawIndustry[validMask]
-                    y = factorZScore(factorClipMad(rawFactor[validMask]))
-                    regressionMask = isValid(y) && isValid(mv)
-                    if (sum(regressionMask) == 0) continue
-                    rowIds = rowIds[regressionMask]
-                    y = y[regressionMask]
-                    mv = mv[regressionMask]
-                    industryValues = industryValues[regressionMask]
-                    industries = sort(distinct(industryValues))
-                    x = matrix(mv)
-                    if (size(industries) > 1) {
-                        for (i in 1 .. (size(industries) - 1)) {
-                            x = x join matrix(double(industryValues == industries[i]))
-                        }
-                    }
-                    design = matrix(take(1.0, size(y))) join x
-                    singularValues = svd(design, false, false)
-                    rankTolerance = max(singularValues) * max([rows(design), cols(design)]) * 2.220446049250313e-16
-                    effectiveRank = sum(singularValues > rankTolerance)
-                    if (size(y) <= effectiveRank) continue
-                    beta = ols(y, x, true, 0, "svd")
-                    fitted = beta[0] + beta[1] * mv
-                    if (size(industries) > 1) {
-                        for (i in 1 .. (size(industries) - 1)) {
-                            fitted += beta[i + 1] * flatten(x[, i])
-                        }
-                    }
-                    rawResidual = y - fitted
-                    residualTolerance = max(abs(y)) * max([rows(design), cols(design)]) * 2.220446049250313e-16
-                    if (!isValid(stdp(rawResidual)) || stdp(rawResidual) <= residualTolerance) continue
-                    residual = factorZScore(rawResidual)
-                    processedValues = processedTable[factorColSym]
-                    processedValues[rowIds] = residual
-                    processedTable[factorColSym] = processedValues
-                }
-                dateIndex += 1
-                if (dateIndex == 1 || dateIndex % 100 == 0 || dateIndex == size(dates)) {
-                    print("因子中性化：" + string(dateIndex) + "/" + string(size(dates)) + "，日期 " + string(date(currentDate)))
-                }
-            }
-            processedTable
-        """)
-        keys = _keys(result)
-        if not set(selected) <= set(result.columns):
-            raise ValueError("DolphinDB preprocess result is missing factor columns")
-        panel = result[selected].copy().reset_index(drop=True)
-        for column in selected:
-            panel[column] = pd.to_numeric(panel[column], errors="raise").astype(float)
-        panel.index = pd.MultiIndex.from_arrays(
-            [keys["time"], keys["code"].map(engine_symbol)], names=["date", "symbol"],
-        )
-        expected_index = pd.MultiIndex.from_arrays(
-            [expected["time"], expected["code"].map(engine_symbol)], names=panel.index.names,
-        )
-        if len(panel) != len(expected) or not panel.index.sort_values().equals(expected_index.sort_values()):
-            raise ValueError("DolphinDB preprocess changed the input time/code keys")
-        panel = panel.sort_index()
+                        missing_industry, row_count, missing_market_value, row_count)
         log.info("因子预处理完成：{} 行，因子={}，各因子 NULL 数={}",
                  len(panel), selected, panel.isna().sum().to_dict())
         return panel
