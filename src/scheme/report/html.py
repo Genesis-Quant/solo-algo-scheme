@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 
 @lru_cache(maxsize=1)
-def _assets() -> dict[str, str]:
+def assets() -> dict[str, str]:
     root = files("scheme.report").joinpath("assets")
     names = {
         "script": "report.js",
@@ -79,7 +79,7 @@ def report_html(
         }
     elif report.report_kind != "backtest":
         raise ValueError(f"不支持的报告类型：{report.report_kind}")
-    payload = json.dumps({"report": data, "assets": _assets()}, ensure_ascii=False).replace(
+    payload = json.dumps({"report": data, "assets": assets()}, ensure_ascii=False).replace(
         "<", "\\u003c"
     )
     return (

@@ -14,24 +14,31 @@ from .schema import Package
 
 def installed_versions() -> dict[str, str]:
     versions = {canonicalize_name(d.metadata["Name"]): d.version for d in metadata.distributions()}
-    log.info("运行环境：Scheme {}，Backtest {}，Arena Runtime {}，DolphinDB SDK {}",
-             versions.get("scheme", "未安装"), versions.get("backtest", "未安装"),
-             versions.get("arena-runtime", "未安装"), versions.get("dolphindb", "未安装"))
+    log.info(
+        f"运行环境：Scheme {versions.get('scheme', '未安装')}，"
+        f"Backtest {versions.get('backtest', '未安装')}，"
+        f"Arena Runtime {versions.get('arena-runtime', '未安装')}，"
+        f"DolphinDB SDK {versions.get('dolphindb', '未安装')}"
+    )
     return versions
 
 
 def validate_scheme_requirement(
-    requirements: list[str], version: Version, package_version: Version | None = None,
+    requirements: list[str],
+    version: Version,
+    package_version: Version | None = None,
 ) -> None:
     """主、次版本一致，依赖范围包含系列起点、排除下一系列且满足当前 scheme。"""
     if any(
         not re.fullmatch(r"[0-9]+(?:\.[0-9]+){0,2}", str(value))
-        for value in (version, package_version) if value is not None
+        for value in (version, package_version)
+        if value is not None
     ):
         raise ValueError("研究包和 scheme 必须使用 1–3 段正式数字版本")
-    if package_version is not None and (
-        package_version.major, package_version.minor
-    ) != (version.major, version.minor):
+    if package_version is not None and (package_version.major, package_version.minor) != (
+        version.major,
+        version.minor,
+    ):
         raise ValueError("研究包主版本和次版本必须与 scheme 一致")
     parsed = [Requirement(text) for text in requirements]
     candidates = [r for r in parsed if canonicalize_name(r.name) == "scheme"]

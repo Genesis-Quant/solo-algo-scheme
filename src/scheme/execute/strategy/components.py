@@ -2,7 +2,7 @@
 
 import importlib
 from importlib import metadata
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from packaging.version import Version
 from pydantic import BaseModel
@@ -17,6 +17,13 @@ from scheme.base import (
     ResearchContext,
     StrategyAnalysisParams,
 )
+from scheme.base.projects.control.default import NoControl
+from scheme.base.projects.execution.default import DirectExecution
+from scheme.base.projects.optimize.default import RiskParity
+from scheme.execute.packages import validate_scheme_requirement
+
+from .api import run_backtest
+from .assembly import context_type, parameter_type, project_parameters
 
 if TYPE_CHECKING:
     from scheme.config import DolphinSettings
@@ -39,8 +46,6 @@ C = TypeVar("C", bound=ResearchContext[Any])
 
 def algo_options(kind: str) -> dict[str, str]:
     """返回已安装同 Scheme major.minor 项目的 {类入口: 包名及版本} 选项。"""
-    from scheme.execute.packages import validate_scheme_requirement
-
     if kind not in BASES:
         raise ValueError(f"未知 Algo 类型：{kind}")
     version = Version(metadata.version("scheme"))
@@ -94,28 +99,23 @@ def run_research(
     ctx: C | None = None,
     settings: "DolphinSettings | None" = None,
 ) -> "BacktestResult[A]":
-    from scheme.base.projects.control.default import NoControl
-    from scheme.base.projects.execution.default import DirectExecution
-    from scheme.base.projects.optimize.default import RiskParity
-
-    from .api import run_backtest
-    from .assembly import context_type, parameter_type, project_parameters
-
     components = research_components(params, kind, current)
     defaults = {
         "optimize": {"risk_parity": RiskParity},
         "control": {"no_control": NoControl},
         "execution": {"direct_execution": DirectExecution},
     }
-    for downstream in list(BASES)[list(BASES).index(kind) + 1:]:
+    for downstream in list(BASES)[list(BASES).index(kind) + 1 :]:
         components[downstream] = defaults[downstream][getattr(params, downstream)]
-    log.debug(
-        "{} 研究组件：{}", kind,
-        "；".join(f"{name} {cls.__module__}:{cls.__name__}" for name, cls in components.items()),
+    description = "；".join(
+        f"{name} {cls.__module__}:{cls.__name__}" for name, cls in components.items()
     )
+    log.debug(f"{kind} 研究组件：{description}")
     context = ctx if ctx is not None else context_type(components["model"])()
     backtest = StrategyAnalysisParams.model_validate(dict(params))
-    algos = tuple(cls(project_parameters(parameter_type(cls), params)) for cls in components.values())
-    result = cast("BacktestResult[A]", run_backtest(algos, context, backtest, settings=settings))
+    algos = tuple(
+        cls(project_parameters(parameter_type(cls), params)) for cls in components.values()
+    )
+    result = run_backtest(algos, context, backtest, settings=settings)
     result.parameters = params.model_copy(deep=True)
     return result

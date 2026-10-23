@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast, overload
 
 import pandas as pd
+from backtest import Algo as BacktestAlgo
 from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict
 
 from scheme.base import (
@@ -18,6 +19,9 @@ from scheme.base import (
     StrategyParams,
 )
 from scheme.base.internal.generic import generic_arguments
+from scheme.base.projects.control.default import NoControl
+from scheme.base.projects.execution.default import DirectExecution
+from scheme.base.projects.optimize.default import RiskParity
 
 if TYPE_CHECKING:
     from scheme.base.projects.factor.params import FactorParams
@@ -31,10 +35,8 @@ C = TypeVar("C", bound=ResearchContext[Any], infer_variance=True)
 T = TypeVar("T", infer_variance=True)
 
 
-def _generic_model(cls: type, index: int) -> type[BaseModel]:
+def generic_model(cls: type, index: int) -> type[BaseModel]:
     """从 Factor[P] / Algo[P, C] 的继承关系解析参数或上下文模型。"""
-    from backtest import Algo as BacktestAlgo
-
     try:
         args = generic_arguments(cls, (Factor, Algo, BacktestAlgo))
     except TypeError as error:
@@ -57,10 +59,10 @@ def parameter_type(cls: type[Algo[P, C]]) -> type[P]: ...
 
 
 def parameter_type(cls: type) -> type[BaseModel]:
-    return _generic_model(cls, 0)
+    return generic_model(cls, 0)
 
 
-def _has_alias_path(value: Any, path: Sequence[str | int]) -> bool:
+def has_alias_path(value: Any, path: Sequence[str | int]) -> bool:
     """Match attribute-mode lookup without treating an invalid value as missing."""
     for key in path:
         if isinstance(value, str):
@@ -75,26 +77,35 @@ def _has_alias_path(value: Any, path: Sequence[str | int]) -> bool:
     return True
 
 
-def _with_alias_path(value: Any, path: Sequence[str | int], field_value: Any) -> Any:
+def with_alias_path(value: Any, path: Sequence[str | int], field_value: Any) -> Any:
     """Copy only alias-path containers; never mutate the source's nested values."""
     if not path:
         return field_value
     key, *rest = path
-    if isinstance(value, (list, tuple)) and isinstance(key, int) and -len(value) <= key < len(value):
+    if (
+        isinstance(value, (list, tuple))
+        and isinstance(key, int)
+        and -len(value) <= key < len(value)
+    ):
         items = list(value)
-        items[key] = _with_alias_path(items[key], rest, field_value)
+        items[key] = with_alias_path(items[key], rest, field_value)
         return tuple(items) if isinstance(value, tuple) else items
     if isinstance(value, BaseModel) and isinstance(key, str):
-        return value.model_copy(update={
-            key: _with_alias_path(getattr(value, key, None), rest, field_value),
-        })
+        return value.model_copy(
+            update={
+                key: with_alias_path(getattr(value, key, None), rest, field_value),
+            }
+        )
     items = dict(value) if isinstance(value, dict) else {}
-    items[key] = _with_alias_path(items.get(key), rest, field_value)
+    items[key] = with_alias_path(items.get(key), rest, field_value)
     return items
 
 
 def project_parameters(
-    model: type[P], source: BaseModel | dict[str, Any], *, overrides: dict[str, Any] | None = None,
+    model: type[P],
+    source: BaseModel | dict[str, Any],
+    *,
+    overrides: dict[str, Any] | None = None,
 ) -> P:
     # dict(model) retains raw nested models and fields excluded from serialization.
     values = dict(source)
@@ -112,21 +123,25 @@ def project_parameters(
             continue
         choices = alias.choices if isinstance(alias, AliasChoices) else [alias]
         paths = [choice.path if isinstance(choice, AliasPath) else [choice] for choice in choices]
-        if canonical or name in overrides or not any(_has_alias_path(values, path) for path in paths):
-            values = _with_alias_path(values, paths[0], values[name])
+        if (
+            canonical
+            or name in overrides
+            or not any(has_alias_path(values, path) for path in paths)
+        ):
+            values = with_alias_path(values, paths[0], values[name])
     # Attribute validation rebuilds the concrete model and ignores undeclared extras.
     return model.model_validate(SimpleNamespace(**values), from_attributes=True)
 
 
 def context_type(cls: type[Algo[P, C]]) -> type[C]:
-    context = _generic_model(cls, 1)
+    context = generic_model(cls, 1)
     if not issubclass(context, ResearchContext):
         raise TypeError("Model 上下文必须继承 ResearchContext")
     return cast(type[C], context)
 
 
 def validate_context(algo: Any, ctx: BaseModel) -> None:
-    expected = _generic_model(type(algo), 1)
+    expected = generic_model(type(algo), 1)
     generic = getattr(expected, "__pydantic_generic_metadata__", {})
     if generic.get("args") == (Any,):
         expected = generic["origin"]
@@ -160,10 +175,6 @@ class Strategy(Generic[StrategyP, C]):
         control: type[ControlAlgo[Any, C]] | None = None,
         execution: type[ExecutionAlgo[Any, C]] | None = None,
     ) -> None:
-        from scheme.base.projects.control.default import NoControl
-        from scheme.base.projects.execution.default import DirectExecution
-        from scheme.base.projects.optimize.default import RiskParity
-
         self.ctx = ctx
         self.params = params
         components = (
@@ -176,8 +187,7 @@ class Strategy(Generic[StrategyP, C]):
             if not isinstance(cls, type) or not issubclass(cls, base):
                 raise TypeError(f"{base.__name__} 环节需要传入对应的 Algo 类")
         self.algos: tuple[Algo[Any, C], ...] = tuple(
-            cls(project_parameters(parameter_type(cls), params))
-            for cls, _ in components
+            cls(project_parameters(parameter_type(cls), params)) for cls, base in components
         )
 
     @cached_property

@@ -12,6 +12,7 @@ from runtime.utils import logger as log
 from scheme.base.internal.algo import Algo
 from scheme.base.internal.context import ResearchContext
 from scheme.base.internal.types import Order, Target
+from scheme.data.dolphindb.database.session import download
 from scheme.data.dolphindb.symbols import normalize_assets
 
 __all__ = ["ControlAlgo"]
@@ -36,6 +37,8 @@ class ControlAlgo(Algo[P, C], Generic[P, C]):
 
     def target_orders(self, target: Target, *, lot_size: int = 100) -> list[Order]:
         """以账户权益为分母，将完整目标权重转换为相对当前持仓的订单。"""
+        if isinstance(lot_size, bool) or not isinstance(lot_size, int) or lot_size <= 0:
+            raise ValueError("每手股数必须是正整数")
         target = normalize_assets(target)
         if any(not np.isfinite(weight) for weight in target.values()):
             raise ValueError("目标权重必须是有限数值")
@@ -45,15 +48,21 @@ class ControlAlgo(Algo[P, C], Generic[P, C]):
         if symbols:
             prices = self.backtest.get_prices(symbols)
             skipped = {
-                s for s in symbols if s not in prices or not np.isfinite(prices[s]) or prices[s] <= 0
+                s
+                for s in symbols
+                if s not in prices or not np.isfinite(prices[s]) or prices[s] <= 0
             }
             if skipped:
-                log.warning("目标证券截至当前时点尚无有效价格，跳过 {} 只下单，保持现有持仓", len(skipped))
+                log.warning(
+                    f"目标证券截至当前时点尚无有效价格，跳过 {len(skipped)} 只下单，保持现有持仓"
+                )
             symbols = [s for s in symbols if s not in skipped]
         if symbols:
             equity = float(
-                self.backtest.session.run(
-                    "exec first(totalEquity) from Backtest::getTotalPortfolios(engine)"
+                download(
+                    self.backtest.session,
+                    "exec first(totalEquity) from Backtest::getTotalPortfolios(engine)",
+                    "当前账户权益",
                 )
             )
             if not np.isfinite(equity) or equity <= 0:

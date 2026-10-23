@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, Literal, Self, TypeVar
 
 from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field, model_validator
 
+import scheme
 from scheme.base.internal.context import ResearchContext
 from scheme.data.dolphindb.symbols import engine_symbol
 from scheme.data.dolphindb.universe import Universe
@@ -29,9 +30,17 @@ def validate_backtest(
     config: dict[str, Any], symbols: list[str] | None, benchmark: str | None
 ) -> tuple[list[str] | None, str | None]:
     reserved = {
-        "startDate", "endDate", "dataType", "frequency", "msgAsTable",
-        "msgAsPiecesOnSnapshot", "callbackForSnapshot", "matchingMode",
-        "matchingRatio", "orderBookMatchingRatio", "benchmark",
+        "startDate",
+        "endDate",
+        "dataType",
+        "frequency",
+        "msgAsTable",
+        "msgAsPiecesOnSnapshot",
+        "callbackForSnapshot",
+        "matchingMode",
+        "matchingRatio",
+        "orderBookMatchingRatio",
+        "benchmark",
     }
     if reserved & config.keys():
         raise ValueError(f"config 包含 runtime 管理的字段：{reserved & config.keys()}")
@@ -63,7 +72,8 @@ class StrategyAnalysisParams(StrategyParams):
     """策略参数加回测设置；将已组装策略运行成报告。"""
 
     market_data: Literal["stock_daily", "stock_snapshot"] = Field(
-        default="stock_daily", title="行情类型",
+        default="stock_daily",
+        title="行情类型",
         json_schema_extra={"x-enum-labels": ["日频合成快照", "Tick 快照"]},
     )
     symbols: list[str] | None = Field(default=None, title="行情股票范围")
@@ -84,17 +94,17 @@ class StrategyAnalysisParams(StrategyParams):
         *,
         settings: "DolphinSettings | None" = None,
     ) -> "BacktestResult[Self]":
-        from scheme.execute.strategy.api import run_backtest
-        from scheme.execute.strategy.assembly import Strategy, parameter_type, project_parameters
-
-        if not isinstance(strategy, Strategy):
+        assembly = scheme.execute.strategy.assembly
+        if not isinstance(strategy, assembly.Strategy):
             raise TypeError("run 需要已组装的 Strategy")
         checked = set(StrategyParams.model_fields)
-        if project_parameters(StrategyParams, self) != project_parameters(StrategyParams, strategy.params):
+        if assembly.project_parameters(StrategyParams, self) != assembly.project_parameters(
+            StrategyParams, strategy.params
+        ):
             raise ValueError("分析参数必须与 Strategy 的运行参数一致")
         for algo in strategy.algos:
-            model = parameter_type(type(algo))
-            if project_parameters(model, self) != algo.params:
+            model = assembly.parameter_type(type(algo))
+            if assembly.project_parameters(model, self) != algo.params:
                 raise ValueError("分析参数必须与 Strategy 的运行参数一致")
             for name, field in model.model_fields.items():
                 checked.add(name)
@@ -105,9 +115,11 @@ class StrategyAnalysisParams(StrategyParams):
                         checked.add(value)
                     elif isinstance(value, AliasPath):
                         checked.add(str(value.path[0]))
-        analysis_fields = set(StrategyAnalysisParams.model_fields) - set(StrategyParams.model_fields)
+        analysis_fields = set(StrategyAnalysisParams.model_fields) - set(
+            StrategyParams.model_fields
+        )
         runtime_model = type(strategy.params)
-        runtime = project_parameters(runtime_model, self)
+        runtime = assembly.project_parameters(runtime_model, self)
         expected = dict(strategy.params)
         actual = {**dict(self), **dict(runtime)}
         for name in runtime_model.model_fields.keys() - checked - analysis_fields:
@@ -125,4 +137,6 @@ class StrategyAnalysisParams(StrategyParams):
         for name in (set(expected) | set(self.model_extra or {})) - checked - analysis_fields:
             if name not in expected or name not in actual or actual[name] != expected[name]:
                 raise ValueError("分析参数必须与 Strategy 的运行参数一致")
-        return run_backtest(strategy.algos, strategy.ctx, self, settings=settings)
+        return scheme.execute.strategy.api.run_backtest(
+            strategy.algos, strategy.ctx, self, settings=settings
+        )

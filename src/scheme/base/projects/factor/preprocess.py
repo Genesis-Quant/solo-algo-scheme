@@ -1,211 +1,246 @@
-"""通过原 factor 模块完成因子预处理，不在 Python 中维护 DOS 算法副本。"""
+"""在 DolphinDB 内连接因子、所属行业和流通市值并执行中性化。"""
 
-import json
 import re
 from collections.abc import Sequence
-from uuid import uuid4
+from contextlib import nullcontext
 
 import numpy as np
 import pandas as pd
 from backtest import DosVar
+from runtime.apps.query import api as query_api
 from runtime.utils import logger as log
 
 from scheme._errors import error_text
 from scheme.config import DolphinSettings
-from scheme.data.dolphindb.api import query
-from scheme.data.dolphindb.database.session import open_session
-from scheme.data.dolphindb.symbols import engine_symbol, source_symbol
+from scheme.data.dolphindb.api import QUERY_SCRIPT
+from scheme.data.dolphindb.database.session import create_session, download, release, upload
+from scheme.data.dolphindb.symbols import engine_symbol
 
-_KEYS = ["time", "code"]
-_RESERVED = {*_KEYS, "date", "symbol", "stock_pool_member"}
+RESERVED = {"time", "code", "date", "symbol", "stock_pool_member"}
 
+PREPROCESS_SCRIPT = """
+use factor
 
-def _name(value: str, label: str) -> str:
-    if not isinstance(value, str) or not value.strip() or "\0" in value:
-        raise ValueError(f"{label} must be a nonempty column name")
-    return value
+def preprocessFactor(inputTable, settings) {
+    required = ["time", "code"] join settings.columns
+    metadata = schema(inputTable).colDefs
+    if (any(!(required in metadata.name))) throw "因子表缺少日期、证券或声明的因子列"
+    if (size(distinct(metadata.name)) != metadata.rows()) throw "因子表列名重复"
+    factorTypes = exec typeString from metadata where name in settings.columns
+    if (any(startsWith(factorTypes, "BOOL") || startsWith(factorTypes, "COMPLEX")))
+        throw "因子值必须是实数"
 
+    input = sql(
+        sqlCol(`time, timestamp, `time) join sqlCol(`code, string, `code) join
+            sqlCol(symbol(settings.columns), double, symbol(settings.columns)),
+        inputTable
+    ).eval()
+    if (input.rows() == 0) throw "因子表不能为空"
+    if (any(isNull(input.time) || timestamp(date(input.time)) != input.time))
+        throw "因子日期必须是非空的日历日期"
+    if (any(isNull(input.code) || strlen(trim(input.code)) == 0))
+        throw "因子证券代码不能为空"
+    replaceColumn!(
+        input,
+        `code,
+        strReplace(strReplace(input.code, ".XSHG", ".SH"), ".XSHE", ".SZ")
+    )
+    duplicates = select count(*) as copies from input group by time, code
+    if (any(duplicates.copies > 1)) throw "规范化证券代码后存在重复日期和证券"
+    if (!any(each(any, each(isValid, input[symbol(settings.columns)])))) throw "因子值全部为空"
 
-def _keys(frame: pd.DataFrame) -> pd.DataFrame:
-    if not isinstance(frame, pd.DataFrame) or not set(_KEYS) <= set(frame.columns):
-        raise ValueError("preprocess requires time and code columns")
-    if frame.empty:
-        raise ValueError("preprocess input must not be empty")
-    keys = frame[_KEYS].copy().reset_index(drop=True)
-    keys["time"] = pd.to_datetime(keys["time"], errors="raise")
-    days = pd.DatetimeIndex(keys["time"])
-    if days.hasnans or days.tz is not None or not days.equals(days.normalize()):
-        raise ValueError("time must contain non-NULL, timezone-naive calendar dates")
-    keys["time"] = days.as_unit("ns")
-    if not keys["code"].map(lambda code: isinstance(code, str) and bool(code.strip())).all():
-        raise ValueError("code must contain nonempty strings")
-    normalized = keys.assign(code=keys["code"].map(engine_symbol))
-    if normalized.duplicated(_KEYS).any():
-        raise ValueError("duplicate time/code keys after symbol normalization")
-    return keys
-
-
-def _columns(available, columns, market_value_column, industry_column) -> list[str]:
-    if len(set(available)) != len(available):
-        raise ValueError("input column names must be unique")
-    if isinstance(columns, (str, bytes)) or not isinstance(columns, Sequence):
-        raise ValueError("columns must be a sequence of factor names")
-    selected = list(columns)
-    if not selected:
-        raise ValueError("columns must not be empty")
-    for column in selected:
-        _name(column, "factor column")
-    if len(set(selected)) != len(selected):
-        raise ValueError("factor columns must be unique")
-    if set(selected) & (_RESERVED | {market_value_column, industry_column}):
-        raise ValueError("factor columns collide with keys or exposure columns")
-    if missing := set(selected) - set(available):
-        raise ValueError(f"missing factor columns: {sorted(missing)}")
-    return selected
+    print("[DOS 预处理] 读取每日所属行业和流通市值，因子记录数=" + string(input.rows()))
+    request = dict(STRING, ANY)
+    request["database"] = settings.database
+    request["table"] = settings.table
+    request["start"] = min(input.time)
+    request["outputStart"] = request["start"]
+    request["end"] = temporalAdd(max(input.time), 1, "d")
+    request["codes"] = distinct(input.code)
+    request["factors"] = settings.factors
+    request["industry"] = settings.industry
+    request["financial"] = settings.financial
+    request["weights"] = settings.weights
+    request["st"] = settings.st
+    request["definitions"] = "{}"
+    request["filters"] = array(STRING, 0)
+    request["columns"] = ["time", "code"] join settings.factors
+    reference = buildQuery(request).data
+    replaceColumn!(reference, `code, string(reference.code))
+    print("[DOS 预处理] 按日期和证券连接因子、所属行业及流通市值")
+    working = lj(input, reference, `time`code)
+    print("[DOS 中性化] 开始 factor::factorPreprocess，因子=" + concat(settings.columns, ", "))
+    processed = factor::factorPreprocess(
+        working,
+        settings.columns,
+        settings.groups,
+        "time",
+        "code",
+        settings.market,
+        settings.industryColumn
+    )
+    print("[DOS 中性化] 完成，校验日期和证券键")
+    if (
+        !eqObj(
+            (exec time from input order by time, code),
+            (exec time from processed order by time, code)
+        ) || !eqObj(
+            (exec code from input order by time, code),
+            (exec code from processed order by time, code)
+        )
+    ) throw "中性化改变了输入日期或证券"
+    return sql(sqlCol(symbol(["time", "code"] join settings.columns)), processed).eval()
+}
+"""
 
 
 def preprocess(
     data: pd.DataFrame | DosVar,
     *,
     columns: Sequence[str],
+    groups: int,
     session=None,
     market_value_column: str = "circ_mv",
     industry_column: str = "industry_l0",
     settings: DolphinSettings | None = None,
 ) -> pd.DataFrame:
-    """保留输入键和 NULL，调用原 factor::factorPreprocess 后只返回因子列。"""
-    for value, label in ((market_value_column, "market_value_column"),
-                         (industry_column, "industry_column")):
-        _name(value, label)
-    if (market_value_column == industry_column
-            or {market_value_column, industry_column} & _RESERVED):
-        raise ValueError("exposure column names collide with keys or each other")
+    if (
+        isinstance(groups, bool)
+        or not isinstance(groups, int)
+        or not 2 <= groups <= np.iinfo(np.int32).max
+    ):
+        raise ValueError("分组数量必须是至少为 2 的 INT 整数")
+    if isinstance(columns, (str, bytes)) or not isinstance(columns, Sequence) or not columns:
+        raise ValueError("因子列必须是非空名称列表")
+    selected = list(columns)
+    for name in [*selected, market_value_column, industry_column]:
+        if not isinstance(name, str) or not name.strip() or "\0" in name:
+            raise ValueError("列名必须是非空字符串且不能包含 NUL")
+    if len(set(selected)) != len(selected):
+        raise ValueError("因子列不能重复")
+    if (
+        market_value_column == industry_column
+        or {market_value_column, industry_column} & RESERVED
+        or set(selected) & (RESERVED | {market_value_column, industry_column})
+    ):
+        raise ValueError("因子、行业、市值和日期证券列不能重名")
+    factors = [market_value_column, industry_column]
+    if unknown := set(factors) - set(query_api.available_factors()):
+        raise ValueError(f"行业或市值字段未声明：{sorted(unknown)}")
     is_variable = isinstance(data, str)
     if is_variable:
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", data) is None:
-            raise ValueError("DosVar must be a single DolphinDB identifier")
+            raise ValueError("DosVar 必须是单个 DolphinDB 变量名")
         if session is None:
-            raise ValueError("DosVar requires an explicit session")
+            raise ValueError("DosVar 必须提供所属 session")
+        if data in {"preprocessInput", "preprocessSettings", "preprocessResult"}:
+            raise ValueError("输入变量名与中性化内部变量重名")
     elif not isinstance(data, pd.DataFrame):
-        raise TypeError("preprocess data must be a DataFrame or DosVar")
-
-    frame = None
+        raise TypeError("预处理输入必须是 DataFrame 或 DosVar")
+    input_ref = data if is_variable else "preprocessInput"
     if not is_variable:
         frame = data
         if isinstance(frame.index, pd.MultiIndex) and list(frame.index.names) == ["date", "symbol"]:
             if set(frame.columns) & {"time", "code", "date", "symbol"}:
-                raise ValueError("canonical index collides with input columns")
+                raise ValueError("面板索引和日期证券列重名")
             frame = frame.reset_index().rename(columns={"date": "time", "symbol": "code"})
-        selected = _columns(frame.columns, columns, market_value_column, industry_column)
-        frame = frame[_KEYS + selected].copy(deep=True)
-        expected = _keys(frame)
-        frame["time"] = expected["time"].to_numpy(dtype="datetime64[ms]")
-        frame["code"] = expected["code"].map(source_symbol).to_numpy()
-        expected = _keys(frame)
+        if not frame.columns.is_unique or not {"time", "code", *selected} <= set(frame.columns):
+            raise ValueError("输入缺列或列名重复")
+        frame = frame[["time", "code", *selected]].copy()
+        if frame.empty:
+            raise ValueError("因子表不能为空")
+        dates = pd.DatetimeIndex(pd.to_datetime(frame["time"], errors="raise"))
+        if dates.hasnans or dates.tz is not None or not dates.equals(dates.normalize()):
+            raise ValueError("time 必须是非空、无时区的日历日期")
+        if not frame["code"].map(lambda code: isinstance(code, str) and bool(code.strip())).all():
+            raise ValueError("code 必须是非空字符串")
+        frame["time"] = dates.to_numpy(dtype="datetime64[ms]")
+        frame["code"] = (
+            frame["code"]
+            .str.replace(".XSHG", ".SH", regex=False)
+            .str.replace(".XSHE", ".SZ", regex=False)
+        )
+        if frame.duplicated(["time", "code"]).any():
+            raise ValueError("规范化证券代码后存在重复日期和证券")
         for column in selected:
-            if pd.api.types.is_bool_dtype(frame[column]) or pd.api.types.is_complex_dtype(frame[column]):
-                raise ValueError("factor columns must be real numeric values")
+            if (
+                pd.api.types.is_bool_dtype(frame[column])
+                or pd.api.types.is_complex_dtype(frame[column])
+                or (
+                    not pd.api.types.is_numeric_dtype(frame[column])
+                    and frame[column]
+                    .map(
+                        lambda value: isinstance(
+                            value, (bool, np.bool_, complex, np.complexfloating)
+                        )
+                    )
+                    .any()
+                )
+            ):
+                raise ValueError("因子值必须是实数")
             frame[column] = pd.to_numeric(frame[column], errors="raise").astype(float)
-        if frame[selected].isna().all().all():
-            raise ValueError("preprocess factors are all NULL")
-
+        if not frame[selected].notna().any().any():
+            raise ValueError("因子值全部为空")
     settings = settings if settings is not None else DolphinSettings.from_env()
     owns_session = session is None
-    if owns_session:
-        session = open_session(settings)
-    prefix = "soloFp" + uuid4().hex
-    names = {key: prefix + key for key in ("Input", "Exposure", "Working", "Processed", "Columns", "Market", "Industry")}
-    try:
-        if is_variable:
-            selected = _columns(
-                list(session.run(f"columnNames({data})")), columns,
-                market_value_column, industry_column,
-            )
-            metadata = session.run(f"schema({data}).colDefs")
-            factor_types = metadata.set_index("name").loc[selected, "typeString"]
-            if factor_types.str.upper().str.startswith(("BOOL", "COMPLEX")).any():
-                raise ValueError("factor columns must be real numeric values")
-            expected = _keys(session.run(f"select time, code from {data}"))
-            session.run(f"""
-                {names['Input']} = sql(
-                    sqlCol(`time, timestamp, `time) join sqlCol(`code, string, `code) join
-                    sqlCol(symbol({json.dumps(selected, ensure_ascii=False)}), double,
-                        symbol({json.dumps(selected, ensure_ascii=False)})), {data}).eval()
-            """)
-        else:
-            session.upload({names["Input"]: frame})
-
-        request = {
-            "start_date": expected["time"].min().date().isoformat(),
-            "end_date": expected["time"].max().date().isoformat(),
-            "codes": sorted({source_symbol(code) for code in expected["code"]}),
-            "factors": [market_value_column, industry_column],
-        }
-        log.info("因子预处理：{}，{} 行、{} 只股票；使用 factor 模块",
-                 selected, len(expected), len(request["codes"]))
-        with query(request, settings=settings) as exposure_result:
-            exposure = exposure_result.data
-        if not exposure.empty:
-            _keys(exposure)
-        exposure["time"] = pd.to_datetime(exposure["time"]).astype("datetime64[ns]")
-        exposure["code"] = exposure["code"].map(source_symbol)
-        aliases = expected[["code"]].drop_duplicates().assign(
-            source_code=lambda value: value["code"].map(source_symbol),
-        ).rename(columns={"code": "input_code"})
-        exposure = exposure.merge(
-            aliases, left_on="code", right_on="source_code", how="inner", validate="many_to_one",
-        )
-        exposure["code"] = exposure.pop("input_code")
-        exposure = exposure[_KEYS + request["factors"]]
-        exposure["time"] = exposure["time"].to_numpy(dtype="datetime64[ms]")
-        session.upload({
-            names["Exposure"]: exposure,
-            names["Columns"]: np.asarray(selected, dtype=str),
-            names["Market"]: market_value_column,
-            names["Industry"]: industry_column,
-        })
-        del exposure
-        session.run(f"""
-            use factor
-            {names['Working']} = lj({names['Input']}, {names['Exposure']}, `time`code)
-        """)
-        has_values = session.run(
-            f"any(each(any, each(isValid, {names['Input']}[symbol({names['Columns']})])))"
-        )
-        if not has_values:
-            raise ValueError("preprocess factors are all NULL")
-        session.run(f"""
-            {names['Processed']} = factor::factorPreprocess(
-                {names['Working']}, {names['Columns']}, 5, "time", "code",
-                {names['Market']}, {names['Industry']})
-        """)
-        processed = session.run(
-            f"sql(sqlCol(symbol([\"time\", \"code\"] join {names['Columns']})), "
-            f"{names['Processed']}).eval()"
-        )
-        keys = _keys(processed)
-        if len(processed) != len(expected) or not set(selected) <= set(processed.columns):
-            raise ValueError("DolphinDB preprocess changed the input shape")
-        expected_index = pd.MultiIndex.from_arrays(
-            [expected["time"], expected["code"].map(engine_symbol)], names=["date", "symbol"],
-        )
-        panel = processed[selected].astype(float).copy()
-        panel.index = pd.MultiIndex.from_arrays(
-            [keys["time"], keys["code"].map(engine_symbol)], names=expected_index.names,
-        )
-        if not panel.index.sort_values().equals(expected_index.sort_values()):
-            raise ValueError("DolphinDB preprocess changed the input time/code keys")
-        panel = panel.sort_index()
-        log.info("因子预处理完成：{} 行，因子={}，各因子 NULL 数={}",
-                 len(panel), selected, panel.isna().sum().to_dict())
-        return panel
-    except Exception as error:
-        log.error("因子预处理失败：{}", error_text(error, settings.password.get_secret_value()))
-        raise
-    finally:
+    with create_session(settings) if owns_session else nullcontext(session) as session:
         try:
-            session.run(f"undef({json.dumps(list(names.values()))}, VAR)")
-        except Exception:
-            pass
-        if owns_session:
-            session.close()
+            query_api.redirect_session_output(session)
+            upload(
+                session,
+                {
+                    "preprocessSettings": {
+                        "database": settings.database,
+                        "table": settings.table,
+                        "columns": np.asarray(selected, dtype=str),
+                        "groups": np.int32(groups),
+                        "market": market_value_column,
+                        "industryColumn": industry_column,
+                        "factors": np.asarray(factors, dtype=str),
+                        "industry": np.asarray(
+                            [f for f in factors if f in query_api.INDUSTRY_FACTORS], dtype=str
+                        ),
+                        "financial": np.asarray(
+                            [f for f in factors if f in query_api.FINANCIAL_FACTORS], dtype=str
+                        ),
+                        "weights": np.asarray(
+                            [f for f in factors if f.startswith(query_api.WEIGHT_PREFIX)], dtype=str
+                        ),
+                        "st": query_api.IS_ST_FACTOR,
+                    }
+                },
+                "中性化列设置",
+            )
+            if not is_variable:
+                upload(session, {input_ref: frame}, "本地因子表")
+            session.run(QUERY_SCRIPT)
+            session.run(PREPROCESS_SCRIPT)
+            session.run(
+                f"preprocessResult = preprocessFactor({input_ref}, preprocessSettings); NULL"
+            )
+            processed = download(session, "preprocessResult", "最终中性化因子")
+            panel = processed[selected].astype(float)
+            panel.index = pd.MultiIndex.from_arrays(
+                [
+                    pd.to_datetime(processed["time"]).to_numpy(dtype="datetime64[ns]"),
+                    processed["code"].map(engine_symbol),
+                ],
+                names=["date", "symbol"],
+            )
+            panel = panel.sort_index()
+            log.info(f"[预处理] 完成：{len(panel)} 行；各因子空值数 {panel.isna().sum().to_dict()}")
+            return panel
+        except BaseException as error:
+            log.error(f"[预处理] 失败：{error_text(error, settings.password.get_secret_value())}")
+            raise
+        finally:
+            if not owns_session:
+                release(
+                    session,
+                    [
+                        "preprocessSettings",
+                        "preprocessResult",
+                        *([] if is_variable else ["preprocessInput"]),
+                    ],
+                    ["preprocessFactor", "buildQuery"],
+                )

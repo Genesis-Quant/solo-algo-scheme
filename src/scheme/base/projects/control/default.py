@@ -27,11 +27,11 @@ class NoControl(ControlAlgo[ControlParams, C], Generic[C]):
 
     def on_target(self, target: Target) -> None:
         orders = self.target_orders(target)
+        buys = sum(order.direction.name.startswith("BUY") for order in orders)
+        sells = sum(order.direction.name.startswith("SELL") for order in orders)
         log.debug(
-            "目标 {} 只 → 订单 {} 笔（买入 {}，卖出 {}）",
-            sum(1 for weight in target.values() if weight), len(orders),
-            sum(1 for order in orders if order.direction.name.startswith("BUY")),
-            sum(1 for order in orders if order.direction.name.startswith("SELL")),
+            f"目标 {sum(bool(weight) for weight in target.values())} 只，"
+            f"订单 {len(orders)} 笔（买入 {buys}，卖出 {sells}）"
         )
         self.ctx.orders = orders
 

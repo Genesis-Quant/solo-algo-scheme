@@ -29,12 +29,15 @@ def risk_parity(returns: pd.DataFrame) -> tuple[np.ndarray, str | None]:
     if not count:
         return np.array([]), None
     equal = np.full(count, 1 / count)
-    valid = returns.dropna()
+    valid = returns.replace([np.inf, -np.inf], np.nan).dropna()
     # Sample covariance needs at least two rows.
     if len(valid) < 2:
         return equal, "历史样本不足"
     covariance = valid.cov().to_numpy()
-    covariance /= np.trace(covariance)
+    variance = np.trace(covariance)
+    if not np.isfinite(covariance).all() or not np.isfinite(variance) or variance <= 0:
+        return equal, "历史收益没有有效波动"
+    covariance /= variance
 
     def objective(weights: np.ndarray) -> float:
         contribution = weights * (covariance @ weights)
@@ -79,7 +82,9 @@ class RiskParity(OptimizeAlgo[OptimizeParams, C], Generic[C]):
                 "end_date": (today - timedelta(days=1)).isoformat(),
                 "codes": [source_symbol(s) for s in symbols],
                 "factors": ["close", "adj_factor"],
-            }
+            },
+            session=self.backtest.session,
+            settings=self.backtest.settings,
         ) as result:
             history = result.data
         history["code"] = history.code.map(engine_symbol)
@@ -106,11 +111,11 @@ class RiskParity(OptimizeAlgo[OptimizeParams, C], Generic[C]):
             }
         )
         if reason:
-            log.warning("风险平价退化为等权：{}（{} 只）", reason, len(symbols))
+            log.warning(f"风险平价退化为等权：{reason}（{len(symbols)} 只）")
         else:
+            maximum = max((abs(value) for value in target.values()), default=0.0)
             log.debug(
-                "风险平价分配 {} 只，总仓位 {:.0%}，最大权重 {:.2%}",
-                len(symbols), self.params.gross_exposure,
-                max((abs(value) for value in target.values()), default=0.0),
+                f"风险平价分配 {len(symbols)} 只，总仓位 {self.params.gross_exposure:.0%}，"
+                f"最大权重 {maximum:.2%}"
             )
         return target

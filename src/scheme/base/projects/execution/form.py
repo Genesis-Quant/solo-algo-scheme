@@ -14,8 +14,8 @@ P = TypeVar("P", bound=ExecutionAnalysisParams, infer_variance=True)
 
 
 class ExecutionReportForm(BacktestForm[P], Generic[P]):
-    _analysis_base = ExecutionAnalysisParams
-    _analysis_model = ExecutionAnalysisParams
+    analysis_base = ExecutionAnalysisParams
+    bound_analysis = ExecutionAnalysisParams
 
     model: str = Field(min_length=1, title="策略建模", json_schema_extra={"x-algo-kind": "model"})
     optimize: str = Field(

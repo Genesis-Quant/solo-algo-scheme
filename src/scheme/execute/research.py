@@ -19,7 +19,7 @@ def run(task: AlgoTask) -> int:
         component = getattr(task.algos, name)
         if component:
             algos[name] = load_component(component, Algo)
-            log.info("加载 {}：{} {}（{}）", name, component.package, component.version, component.entry)
+            log.info(f"加载 {name}：{component.package} {component.version}（{component.entry}）")
     context = (
         load_entry(distribution(task.algos.model.package), task.context)
         if task.context

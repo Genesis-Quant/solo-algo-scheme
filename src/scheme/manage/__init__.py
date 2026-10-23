@@ -10,6 +10,8 @@ from runtime.utils import logger as log
 
 from scheme._errors import error_text
 
+from .parameters import inspect_project
+
 TASK_KINDS = ("factor", "model", "optimize", "control", "execution", "strategy")
 
 
@@ -21,10 +23,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--project", type=Path)
     parser.add_argument("--validate", action="store_true")
     arguments = parser.parse_args(argv)
+    if arguments.command == "run":
+        log.remove()
+        log.add(
+            sys.stdout,
+            level="INFO",
+            format="{time:YYYY-MM-DD HH:mm:ss} | {level:<7} | {message}",
+            backtrace=False,
+            diagnose=False,
+        )
     try:
         if arguments.command == "parameters":
-            from .parameters import inspect_project
-
             if arguments.project is None:
                 raise ValueError("parameters 需要 --project")
             values = json.load(sys.stdin) if arguments.validate else None
@@ -42,18 +51,22 @@ def main(argv: list[str] | None = None) -> int:
         if output != arguments.output.resolve():
             raise ValueError("输出目录与 input.output 不一致")
         data["output"] = str(output)
-        components = [data["factor"]] if kind == "factor" else [item for item in data["algos"].values() if item]
-        log.info("任务 {}：类型={}，组件={}，输出={}",
-                 input_file.parent.name, kind,
-                 "; ".join(f"{item['package']} {item['version']} ({item['entry']})" for item in components),
-                 output)
+        components = (
+            [data["factor"]]
+            if kind == "factor"
+            else [item for item in data["algos"].values() if item]
+        )
+        descriptions = "; ".join(
+            f"{item['package']} {item['version']} ({item['entry']})" for item in components
+        )
+        log.info(f"任务 {input_file.parent.name}：类型={kind}，组件={descriptions}，输出={output}")
         code = import_module(f"scheme.execute.{kind}.task").run(data)
-        log.success("正式任务完成：{}，输出 {}", kind, output)
+        log.success(f"正式任务完成：{kind}，输出 {output}")
         return code
     except Exception as error:
         if arguments.command == "run":
             # 正式任务的错误连同 traceback 进入调度日志；parameters 的 stderr 仍是单行错误协议。
-            log.error("正式任务失败：{}", error_text(error, traceback=True))
+            log.error(f"正式任务失败：{error_text(error, traceback=True)}")
         else:
             print(f"{type(error).__name__}: {error}", file=sys.stderr)
         return 1

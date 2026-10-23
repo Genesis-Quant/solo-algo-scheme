@@ -15,10 +15,10 @@ def run(data: dict[str, Any]) -> int:
     check_output(task)
     versions = installed_versions()
     factor = load_component(task.factor, Factor)
-    log.info("加载因子：{} {}（{}）", task.factor.package, task.factor.version, task.factor.entry)
-    shared = {"universe": task.analysis.universe}
+    log.info(f"加载因子：{task.factor.package} {task.factor.version}（{task.factor.entry}）")
+    shared = {"universe": task.analysis.universe, "groups": task.analysis.groups}
     params = project_parameters(parameter_type(factor), task.factor.params, overrides=shared)
     task.factor.params = params.model_dump(mode="json")
-    result = analyze_factors(factor(params), task.analysis)
-    save_run(task, result, versions)
+    with analyze_factors(factor(params), task.analysis) as result:
+        save_run(task, result, versions)
     return 0

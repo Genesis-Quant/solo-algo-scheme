@@ -1,4 +1,4 @@
-"""研究链路的两阶段事件调度。"""
+"""研究事件调度、回测进度及统一数据交互。"""
 
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -15,6 +15,8 @@ from runtime.utils import logger as log
 
 from scheme._errors import error_text
 from scheme.base import Algo, Order
+from scheme.config import DolphinSettings
+from scheme.data.dolphindb.database.session import download, open_session, release, upload
 from scheme.data.dolphindb.symbols import engine_symbol, normalize_order
 
 __all__ = ["Backtest"]
@@ -24,8 +26,6 @@ C = TypeVar("C", bound=BaseModel, infer_variance=True)
 
 @dataclass
 class Progress:
-    """按月汇总回测进度；订单、成交和拒单计数在每次月报后清零。"""
-
     month: pd.Period | None = None
     net_value: float | None = 1.0
     orders: int = 0
@@ -43,8 +43,35 @@ class Progress:
 class Backtest(BaseBacktest[C], Generic[C]):
     algos: tuple[Algo[Any, C], ...]
 
+    def __init__(
+        self,
+        settings: DolphinSettings,
+        *,
+        engine_name: str,
+        config: dict[str, Any],
+        ctx: C,
+        algos: Sequence[Algo[Any, C]] = (),
+    ) -> None:
+        self.settings = settings
+        super().__init__(
+            session=open_session(settings),
+            engine_name=engine_name,
+            config=config,
+            ctx=ctx,
+            algos=algos,
+        )
+
+    def upload(self, variables: dict[str, Any], label: str) -> None:
+        upload(self.session, variables, label)
+
+    def download(self, expression: str, label: str) -> Any:
+        return download(self.session, expression, label)
+
+    def release(self, variables: Sequence[str]) -> None:
+        release(self.session, variables)
+
     @cached_property
-    def _latest_prices(self) -> dict[str, float]:
+    def latest_prices(self) -> dict[str, float]:
         return {}
 
     @cached_property
@@ -58,21 +85,20 @@ class Backtest(BaseBacktest[C], Generic[C]):
         day = moment.normalize()
         if progress.day is not None and (day != progress.day or progress.finishing):
             progress.completed_days += 1
-            total = len(self.universe.index) if hasattr(self, "parameters") and self.parameters.symbols is None else "未知"
-            log.info("回放进度 {}/{} 个交易日，截至 {}；行情时点 {}，订单 {}，成交回报 {}，拒单 {}",
-                     progress.completed_days, total, progress.day.date(), progress.moments,
-                     progress.total_orders, progress.total_trades, progress.total_rejected)
+            log.info(
+                f"[回放] 已完成 {progress.completed_days} 个交易日，截至 {progress.day.date()}；"
+                f"行情时点 {progress.moments}，订单 {progress.total_orders}，"
+                f"成交回报 {progress.total_trades}，拒单 {progress.total_rejected}"
+            )
         if progress.finishing:
             return
         progress.day = day
         progress.moments += 1
-        # 新交易日首个行情进入插件后，上一交易日的日终账户记录才会生成。
         self.report_month(moment)
-        # 当前行情进入引擎后、订单/成交回报分发前更新；不读取尚未推进的行情。
-        prices = self.session.run(f"exec dict(string(symbol), lastPrice) from {msg}")
+        prices = self.download(f"exec dict(string(symbol), lastPrice) from {msg}", "当前行情价格")
         for symbol, price in prices.items():
             if price is not None and isfinite(price) and price > 0:
-                self._latest_prices[symbol] = float(price)
+                self.latest_prices[symbol] = float(price)
 
     def finish(self, msg: DosVar) -> None:
         self.progress.finishing = True
@@ -80,118 +106,85 @@ class Backtest(BaseBacktest[C], Generic[C]):
             super().finish(msg)
         finally:
             self.progress.finishing = False
+            self.release(["soloMessages"])
 
     def report_month(self, moment: pd.Timestamp) -> None:
-        """进入新月份时汇总上月；账户记录截至上月最后一个交易日日终。"""
         progress = self.progress
         month = moment.to_period("M")
         if progress.month is None or month == progress.month:
             progress.month = month
             return
-        self.session.upload({"soloProgressDate": np.datetime64(moment.date(), "D")})
-        portfolios = self.get_records(
-            "select top 1 * from Backtest::getDailyTotalPortfolios(engine) "
-            "where tradeDate < soloProgressDate order by tradeDate desc",
-            DailyPortfolio,
-        )
+        try:
+            self.upload({"progressDate": np.datetime64(moment.date(), "D")}, "回测月报截止日")
+            portfolios = self.get_records(
+                "select top 1 * from Backtest::getDailyTotalPortfolios(engine) "
+                "where tradeDate < progressDate order by tradeDate desc",
+                DailyPortfolio,
+            )
+        finally:
+            self.release(["progressDate"])
         if portfolios:
             latest = portfolios[0]
             positions = sum(
-                1 for item in self.get_position().values()
-                if item.longPosition > 0 or item.shortPosition > 0
+                item.longPosition > 0 or item.shortPosition > 0
+                for item in self.get_position().values()
             )
             monthly = (
                 f"{latest.netValue / progress.net_value - 1:+.2%}"
-                if progress.net_value is not None and progress.net_value > 0 else "不可用"
+                if progress.net_value is not None and progress.net_value > 0
+                else "不可用"
             )
+            cash = latest.cash / latest.totalEquity if latest.totalEquity else 0.0
             log.info(
-                "{} 完成：净值 {:.4f}（本月 {}），持仓 {} 只，现金 {:.1%}；"
-                "订单 {}，成交 {}，拒单 {}",
-                progress.month, latest.netValue, monthly,
-                positions, latest.cash / latest.totalEquity if latest.totalEquity else 0.0,
-                progress.orders, progress.trades, progress.rejected,
+                f"[月报] {progress.month}：净值 {latest.netValue:.4f}（本月 {monthly}），"
+                f"持仓 {positions} 只，现金 {cash:.1%}；"
+                f"订单 {progress.orders}，成交 {progress.trades}，拒单 {progress.rejected}"
             )
             progress.net_value = latest.netValue
         progress.month = month
         progress.orders = progress.trades = progress.rejected = 0
 
     def get_prices(self, symbols: Sequence[str]) -> dict[str, float]:
-        """接受两种后缀，返回以 .XSHE/.XSHG 为键的最近有效价。"""
         return {
-            symbol: self._latest_prices[symbol]
+            symbol: self.latest_prices[symbol]
             for symbol in map(engine_symbol, symbols)
-            if symbol in self._latest_prices
+            if symbol in self.latest_prices
         }
 
     def submit_order(self, order: Order) -> int:
-        """统一证券后缀后下单，不修改传入的订单对象。"""
-        order = normalize_order(order)
-        try:
-            identifier = super().submit_order(order)
-        except Exception as error:
-            log.error("委托提交失败：时间={}，证券={}，方向={}，数量={}；{}",
-                      self.time, order.symbol, order.direction.name, order.quantity, error_text(error))
-            raise
+        identifier = super().submit_order(normalize_order(order))
         self.progress.orders += 1
         self.progress.total_orders += 1
-        log.debug("委托 #{}：时间={}，{} {} {} 股，类型={}",
-                  identifier, self.time, order.symbol, order.direction.name,
-                  order.quantity, type(order).__name__)
         return identifier
 
     def cancel_order(
-        self,
-        symbol: str = "",
-        orders: Sequence[int] | None = None,
-        label: str = "",
+        self, symbol: str = "", orders: Sequence[int] | None = None, label: str = ""
     ) -> None:
-        """按证券撤单时接受 .SZ/.SH 和 .XSHE/.XSHG。"""
         super().cancel_order(engine_symbol(symbol), orders, label)
 
     def on_event(self, callback: str, payload: Any) -> None:
-        """逆序通知一次事件，然后正序消费消息直至没有可处理的消息。
-
-        下单生成的回报仍由底层 process_events 读取，当前轮处理完成后才会
-        通知下一批回报；此处不追加行情、不递归分发回报。
-        """
         if callback == "on_order":
             for report in payload:
                 if report.status == OrderStatus.REJECTED:
                     self.progress.rejected += 1
                     self.progress.total_rejected += 1
+                    price = f"{report.price:.2f}" if report.price else "市价"
                     log.warning(
-                        "拒单 #{}：时间={}，{} {} {} 股 @ {}；状态={}，插件回报未提供拒单原因",
-                        report.orderId, report.updateTime, report.symbol,
-                        report.direction.name, report.qty,
-                        f"{report.price:.2f}" if report.price else "市价", report.status.name,
+                        f"拒单 #{report.orderId}：{report.updateTime}，{report.symbol} "
+                        f"{report.direction.name} {report.qty} 股 @ {price}；插件回报未提供拒单原因"
                     )
         elif callback == "on_trade":
             self.progress.trades += len(payload)
             self.progress.total_trades += len(payload)
-            for trade in payload:
-                log.debug("成交 #{}：{}，{} {} {} 股 @ {:.4f}，金额 {:.2f}",
-                          trade.orderId, trade.tradeTime, trade.symbol, trade.direction.name,
-                          trade.tradeQty, trade.tradePrice, trade.tradeValue)
         try:
             super().on_event(callback, payload)
+            while True:
+                progressed = False
+                for algo in self.algos:
+                    if algo.process():
+                        progressed = True
+                if not progressed:
+                    return
         except Exception as error:
-            log.error("算法回调失败：事件={}，时间={}；{}", callback, self.time, error_text(error))
+            log.error(f"研究事件处理失败：事件={callback}，时间={self.time}；{error_text(error)}")
             raise
-        while True:
-            progressed = False
-            for algo in self.algos:
-                try:
-                    consumed = algo.process()
-                except Exception as error:
-                    log.error("研究环节失败：算法={}.{}，时间={}；{}",
-                              type(algo).__module__, type(algo).__qualname__, self.time, error_text(error))
-                    raise
-                if consumed:
-                    progressed = True
-                    log.debug("研究决策 {}：{}.{} 已处理；待处理 signal={}、target={}、orders={}",
-                             self.time, type(algo).__module__, type(algo).__qualname__,
-                             len(self.ctx.signal) if self.ctx.signal is not None else 0,
-                             len(self.ctx.target) if self.ctx.target is not None else 0,
-                             len(self.ctx.orders) if self.ctx.orders is not None else 0)
-            if not progressed:
-                return

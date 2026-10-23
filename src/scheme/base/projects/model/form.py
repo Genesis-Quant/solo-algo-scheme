@@ -14,8 +14,8 @@ P = TypeVar("P", bound=ModelAnalysisParams, infer_variance=True)
 
 
 class ModelReportForm(BacktestForm[P], Generic[P]):
-    _analysis_base = ModelAnalysisParams
-    _analysis_model = ModelAnalysisParams
+    analysis_base = ModelAnalysisParams
+    bound_analysis = ModelAnalysisParams
 
     optimize: Literal["risk_parity"] = Field(
         default="risk_parity", title="组合优化", json_schema_extra={"x-enum-labels": ["风险平价"]}
@@ -24,6 +24,7 @@ class ModelReportForm(BacktestForm[P], Generic[P]):
         default="no_control", title="订单风控", json_schema_extra={"x-enum-labels": ["不风控"]}
     )
     execution: Literal["direct_execution"] = Field(
-        default="direct_execution", title="算法下单",
+        default="direct_execution",
+        title="算法下单",
         json_schema_extra={"x-enum-labels": ["不拆单"]},
     )

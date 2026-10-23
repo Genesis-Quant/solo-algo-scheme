@@ -32,5 +32,7 @@ def save_run(task: Task, result: Report, versions: dict[str, str]) -> None:
         encoding="utf-8",
     )
     temporary.replace(task.output / "run.json")
-    log.success("报告已保存：{} 个文件，共 {} 字节，目录 {}",
-                len(paths), sum(path.stat().st_size for path in paths), task.output)
+    log.success(
+        f"报告已保存：{len(paths)} 个文件，"
+        f"共 {sum(path.stat().st_size for path in paths)} 字节，目录 {task.output}"
+    )

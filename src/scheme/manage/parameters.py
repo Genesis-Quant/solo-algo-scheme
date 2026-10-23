@@ -25,11 +25,18 @@ from scheme.base import (
     OptimizeAnalysisParams,
     ReportForm,
 )
+from scheme.base.internal.form import ResearchForm
 from scheme.base.internal.generic import generic_arguments
+from scheme.execute.strategy.assembly import parameter_type, project_parameters
+from scheme.execute.strategy.components import BASES, algo_options, research_components
 
 
-def _form_key(model: type[BaseModel], name: str) -> str:
-    alias = model.model_fields[name].validation_alias if model.model_config.get("validate_by_alias") is not False else None
+def form_key(model: type[BaseModel], name: str) -> str:
+    alias = (
+        model.model_fields[name].validation_alias
+        if model.model_config.get("validate_by_alias") is not False
+        else None
+    )
     if isinstance(alias, AliasChoices):
         alias = next((choice for choice in alias.choices if isinstance(choice, str)), None)
         if alias is None:
@@ -39,7 +46,7 @@ def _form_key(model: type[BaseModel], name: str) -> str:
     return alias if isinstance(alias, str) else name
 
 
-def _form_value(value: Any, annotation: Any = Any) -> Any:
+def form_value(value: Any, annotation: Any = Any) -> Any:
     """Encode defaults with each nested model's validation keys, not serialization aliases."""
     if isinstance(value, BaseModel):
         annotation, value = type(value), dict(value)
@@ -51,27 +58,27 @@ def _form_value(value: Any, annotation: Any = Any) -> Any:
     if isinstance(value, dict):
         if isinstance(annotation, type) and issubclass(annotation, BaseModel):
             fields = annotation.model_fields
-            wire = {name: _form_key(annotation, name) for name in fields}
+            wire = {name: form_key(annotation, name) for name in fields}
             canonical = {key: name for name, key in wire.items()}
             result = {}
             for key, item in value.items():
                 name = key if key in fields else canonical.get(key)
                 if name is None:
-                    result[key] = _form_value(item)  # Unknown inputs must still reach validation.
+                    result[key] = form_value(item)  # Unknown inputs must still reach validation.
                 else:
-                    result[wire[name]] = _form_value(item, fields[name].annotation)
+                    result[wire[name]] = form_value(item, fields[name].annotation)
             return result
         item_type = args[1] if origin is dict and len(args) == 2 else Any
-        return {key: _form_value(item, item_type) for key, item in value.items()}
+        return {key: form_value(item, item_type) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         item_type = args[0] if args else Any
-        return [_form_value(item, item_type) for item in value]
+        return [form_value(item, item_type) for item in value]
     if value is None or isinstance(value, (str, int, float, bool)):
         return value  # JSON scalars are already encoded; do not coerce or drop invalid inputs.
     return TypeAdapter(annotation).dump_python(value, mode="json", by_alias=False)
 
 
-class _FormSchema(GenerateJsonSchema):
+class FormSchema(GenerateJsonSchema):
     def model_schema(self, schema: core_schema.ModelSchema) -> dict:
         previous = self.by_alias
         self.by_alias = schema["cls"].model_config.get("validate_by_alias") is not False
@@ -81,35 +88,35 @@ class _FormSchema(GenerateJsonSchema):
             self.by_alias = previous
 
     def encode_default(self, value: Any) -> Any:
-        return super().encode_default(_form_value(value))
+        return super().encode_default(form_value(value))
 
 
-def _form_schema(model: type[BaseModel]) -> tuple[dict, dict[str, str]]:
+def form_schema(model: type[BaseModel]) -> tuple[dict, dict[str, str]]:
     """Keep Pydantic's refs/required handling, scoped to each model's alias policy."""
-    schema = model.model_json_schema(mode="validation", schema_generator=_FormSchema)
+    schema = model.model_json_schema(mode="validation", schema_generator=FormSchema)
     properties = schema.get("properties", {})
     wire = {}
     for name in model.model_fields:
-        key = _form_key(model, name)
+        key = form_key(model, name)
         if key not in properties or key in wire.values():
-            raise ValueError(f"Form 字段 {name!r} 无法唯一对应 schema wire key {key!r}（unsupported）")
+            raise ValueError(
+                f"Form 字段 {name!r} 无法唯一对应 schema wire key {key!r}（unsupported）"
+            )
         wire[name] = key
     return schema, wire
 
 
 def defaults(model: type[BaseModel]) -> dict[str, Any]:
-    _, wire = _form_schema(model)
+    wire = form_schema(model)[1]
     return {
-        wire[name]: _form_value(spec.get_default(call_default_factory=True), spec.annotation)
+        wire[name]: form_value(spec.get_default(call_default_factory=True), spec.annotation)
         for name, spec in model.model_fields.items()
         if not spec.is_required() and not spec.default_factory_takes_validated_data
     }
 
 
-def _analysis_type(form: type[ReportForm], expected: type[BaseModel]) -> type[BaseModel]:
+def resolve_analysis_type(form: type[ReportForm], expected: type[BaseModel]) -> type[BaseModel]:
     """解析公共自动表单或旧式手写 ReportForm 的具体分析类型。"""
-    from scheme.base.internal.form import ResearchForm
-
     if issubclass(form, ResearchForm):
         model = form.analysis_model()
         if not issubclass(model, expected):
@@ -156,15 +163,13 @@ def inspect_project(directory: Path, values: dict | None = None) -> dict:
         raise ValueError(f"{algo_base.__name__} 必须继承 Scheme 对应基类")
     if not isinstance(form_type, type) or not issubclass(form_type, ReportForm):
         raise ValueError(f"{form_name} 必须继承 ReportForm")
-    analysis_type = _analysis_type(form_type, expected_analysis)
-    schema, _ = _form_schema(form_type)
+    analysis_type = resolve_analysis_type(form_type, expected_analysis)
+    schema = form_schema(form_type)[0]
     if values is not None:
         analysis = form_type.model_validate(values["form"]).build()
         if not isinstance(analysis, analysis_type):
             raise ValueError(f"{form_name}.build() 必须返回 {analysis_type.__name__}")
         if algo_base is not Factor:
-            from scheme.execute.strategy.components import BASES, research_components
-
             kind = next(name for name, base in BASES.items() if base is algo_base)
             components = research_components(analysis, kind, algo_type)
             upstream = {}
@@ -185,17 +190,17 @@ def inspect_project(directory: Path, values: dict | None = None) -> dict:
                 "upstream": upstream,
                 "backtest": analysis.model_dump(mode="json"),
             }
-        from scheme.execute.strategy.assembly import parameter_type, project_parameters
-
         factor_model = parameter_type(algo_type)
         unsupported = (
-            set(type(analysis).model_fields) | set(analysis.model_extra or {})
-        ) - factor_model.model_fields.keys() - FactorAnalysisParams.model_fields.keys()
+            (set(type(analysis).model_fields) | set(analysis.model_extra or {}))
+            - factor_model.model_fields.keys()
+            - FactorAnalysisParams.model_fields.keys()
+        )
         if unsupported:
             raise ValueError(
                 f"因子分析自定义字段无法由标准分析器或 Factor 参数保存：{sorted(unsupported)}"
             )
-        analysis._bind_columns(algo_type)
+        analysis.bind_columns(algo_type)
         factor_params = project_parameters(factor_model, analysis)
         analysis_params = project_parameters(FactorAnalysisParams, analysis)
         return {
@@ -203,8 +208,6 @@ def inspect_project(directory: Path, values: dict | None = None) -> dict:
             "factor": factor_params.model_dump(mode="json"),
             "analysis": analysis_params.model_dump(mode="json"),
         }
-
-    from scheme.execute.strategy.components import algo_options
 
     for field in schema.get("properties", {}).values():
         if kind := field.get("x-algo-kind"):

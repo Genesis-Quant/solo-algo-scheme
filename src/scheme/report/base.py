@@ -1,14 +1,15 @@
-"""沿用 Arena 的结果属性和固定 Parquet 文件名；结果不依赖存活会话。"""
+"""结果展示和固定 Parquet 导出；数据来源由具体 Result 管理。"""
 
-from dataclasses import dataclass
+import sys
 from pathlib import Path
 from typing import ClassVar, Literal
 
 import pandas as pd
 from runtime.utils import logger as log
 
+from scheme.report.html import report_html
 
-@dataclass
+
 class Report:
     filenames: ClassVar[dict[str, str]] = {}
     report_kind: ClassVar[str] = ""
@@ -26,12 +27,8 @@ class Report:
             "report.show() 需要通过 Solo 启动 Jupyter Server，由启动桥接在 IPython shell 上"
             "提供 solo_report_display；独立导出请使用 report.to_html()。"
         )
-        try:
-            from IPython import get_ipython
-        except ImportError as error:
-            raise RuntimeError(message) from error
-
-        shell = get_ipython()
+        ipython = sys.modules.get("IPython")
+        shell = ipython.get_ipython() if ipython is not None else None
         provider = getattr(shell, "solo_report_display", None)
         if not callable(provider):
             raise RuntimeError(message)
@@ -51,8 +48,6 @@ class Report:
         risk_free_rate: float = 0.0,
     ) -> str:
         """返回内含页面、图表引擎和数据的独立 HTML，可保存后离线打开。"""
-        from scheme.report import report_html
-
         return report_html(
             self,
             theme=theme,
@@ -67,13 +62,15 @@ class Report:
             destination = output / filename
             temporary = destination.with_suffix(".parquet.tmp")
             frame = getattr(self, name)
-            log.debug("写入 Parquet：{}，{} 行、{} 列", destination, len(frame), len(frame.columns))
+            log.debug(f"写入 Parquet：{destination}，{len(frame)} 行、{len(frame.columns)} 列")
             frame.to_parquet(temporary, index=False)
             temporary.replace(destination)
             paths.append(destination)
-            log.info("保存报告 {}/{}：{}，{} 行、{} 列，{} 字节",
-                     index, len(self.filenames), filename, len(frame), len(frame.columns),
-                     destination.stat().st_size)
+            log.info(
+                f"保存报告 {index}/{len(self.filenames)}：{filename}，"
+                f"{len(frame)} 行、{len(frame.columns)} 列，{destination.stat().st_size} 字节"
+            )
+            del frame
         return paths
 
     def preview(self, name: str, rows: int = 20) -> pd.DataFrame:

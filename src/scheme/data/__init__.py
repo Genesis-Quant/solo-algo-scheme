@@ -1,5 +1,6 @@
 """统一数据查询入口；Tushare 仅在被导入使用时初始化。"""
 
+from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 from .dolphindb.api import query
@@ -13,8 +14,7 @@ __all__ = ["query", "ts_api", "pro"]
 
 def __getattr__(name: str) -> Any:
     if name in {"ts_api", "pro"}:
-        from .tushare.api import pro, ts_api
-
-        globals().update(ts_api=ts_api, pro=pro)
+        module = import_module("scheme.data.tushare.api")
+        globals().update(ts_api=module.ts_api, pro=module.pro)
         return globals()[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

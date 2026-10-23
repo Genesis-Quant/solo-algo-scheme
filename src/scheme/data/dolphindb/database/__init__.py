@@ -1,3 +1,3 @@
-from .session import create_session
+from .session import create_session, download, upload
 
-__all__ = ["create_session"]
+__all__ = ["create_session", "download", "upload"]

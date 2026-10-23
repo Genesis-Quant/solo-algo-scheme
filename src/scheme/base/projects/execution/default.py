@@ -37,4 +37,4 @@ class DirectExecution(ExecutionAlgo[DefaultParams, C], Generic[C]):
         for pending in orders:
             order = pending.model_copy(update={"time": now})
             self.backtest.submit_order(order)
-        log.debug("直接提交 {} 笔订单", len(orders))
+        log.debug(f"直接提交 {len(orders)} 笔订单")
