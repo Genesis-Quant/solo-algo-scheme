@@ -26,14 +26,14 @@ class DolphinSettings(BaseModel):
 
 
 class BacktestSettings(DolphinSettings):
-    host: str = "210.45.79.253"
-    port: int = 18902
+    host: str = "dolphindb"
+    port: int = 8848
 
     @classmethod
     def from_env(cls) -> "BacktestSettings":
         return cls(
-            host=os.environ.get("BACKTEST_DOLPHIN_HOST", "210.45.79.253"),
-            port=os.environ.get("BACKTEST_DOLPHIN_PORT", 18902),
+            host=os.environ.get("BACKTEST_DOLPHIN_HOST", "dolphindb"),
+            port=os.environ.get("BACKTEST_DOLPHIN_PORT", 8848),
             username=os.environ["BACKTEST_DOLPHIN_USERNAME"],
             password=SecretStr(os.environ["BACKTEST_DOLPHIN_PASSWORD"]),
         )

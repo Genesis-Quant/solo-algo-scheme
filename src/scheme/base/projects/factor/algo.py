@@ -149,7 +149,7 @@ class Factor(ABC, Generic[P]):
         industry_column: str = "industry_l0",
         settings: DolphinSettings | None = None,
     ) -> pd.DataFrame:
-        """在 compute 返回前调用 DOS 去极值、标准化和市值/动态行业中性化。
+        """在 compute 返回前调用 factor 模块去极值、标准化和市值/动态行业中性化。
 
         接受 time/code 普通列或 (date, symbol) 面板；DosVar 必须显式传 session。
         因子列来自 self.columns；暴露按输入日期和证券独立查询。无效或退化记录
