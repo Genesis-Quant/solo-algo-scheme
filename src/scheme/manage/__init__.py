@@ -23,15 +23,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--project", type=Path)
     parser.add_argument("--validate", action="store_true")
     arguments = parser.parse_args(argv)
-    if arguments.command == "run":
-        log.remove()
-        log.add(
-            sys.stdout,
-            level="INFO",
-            format="{time:YYYY-MM-DD HH:mm:ss} | {level:<7} | {message}",
-            backtrace=False,
-            diagnose=False,
-        )
     try:
         if arguments.command == "parameters":
             if arguments.project is None:
@@ -60,7 +51,16 @@ def main(argv: list[str] | None = None) -> int:
             f"{item['package']} {item['version']} ({item['entry']})" for item in components
         )
         log.info(f"任务 {input_file.parent.name}：类型={kind}，组件={descriptions}，输出={output}")
-        code = import_module(f"scheme.execute.{kind}.task").run(data)
+        from scheme.execute.checkpoints import Checkpoints
+
+        environment = data.get("environment")
+        lockfile = (
+            input_file.parent / environment["lockfile"]
+            if isinstance(environment, dict) and isinstance(environment.get("lockfile"), str)
+            else None
+        )
+        checkpoints = Checkpoints.for_input(input_file, lockfile)
+        code = import_module(f"scheme.execute.{kind}.task").run(data, checkpoints=checkpoints)
         log.success(f"正式任务完成：{kind}，输出 {output}")
         return code
     except Exception as error:

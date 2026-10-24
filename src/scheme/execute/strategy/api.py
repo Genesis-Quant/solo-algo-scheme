@@ -24,6 +24,7 @@ from scheme.config import DolphinSettings
 from scheme.data import query
 from scheme.data.dolphindb.database.session import download, release, upload
 from scheme.data.dolphindb.symbols import engine_symbol, source_symbol
+from scheme.execute.checkpoints import Checkpoints
 from scheme.execute.strategy.assembly import validate_context
 from scheme.execute.strategy.engine import Backtest
 
@@ -324,6 +325,7 @@ def run_backtest(
     *,
     settings: DolphinSettings | None = None,
     engine_type: type[ResearchBacktest[C]] = ResearchBacktest,
+    checkpoints: Checkpoints | None = None,
 ) -> BacktestResult[A]:
     settings = settings if settings is not None else DolphinSettings.from_env()
     if not algos:
@@ -340,7 +342,7 @@ def run_backtest(
         f"印花税 {config['tax']:.4%}，基准={parameters.benchmark or '无'}，算法={algorithms}"
     )
     try:
-        result = execute_backtest(algos, ctx, parameters, settings, engine_type)
+        result = execute_backtest(algos, ctx, parameters, settings, engine_type, checkpoints)
     except Exception as error:
         log.error(
             f"[回测] 失败：{parameters.start} 至 {parameters.end}，"
@@ -391,57 +393,100 @@ def summarize(result: BacktestResult[Any]) -> None:
         )
 
 
+RECORDS = frozenset(
+    {
+        "trade_details",
+        "daily_positions",
+        "daily_portfolios",
+        "daily_trading_statistics",
+        "allocation_diagnostics",
+    }
+)
+
+
+def with_benchmark(
+    portfolios: pd.DataFrame,
+    parameters: StrategyAnalysisParams,
+    settings: DolphinSettings,
+    session: Any | None,
+) -> pd.DataFrame:
+    """session 为空时由查询自行建立并关闭连接，用于从回放检查点恢复。"""
+    if not parameters.benchmark or portfolios.empty:
+        return portfolios
+    with query(
+        {
+            "start_date": parameters.start.isoformat(),
+            "end_date": (parameters.end - timedelta(days=1)).isoformat(),
+            "codes": [source_symbol(parameters.benchmark)],
+            "factors": ["close"],
+        },
+        session=session,
+        settings=settings,
+    ) as result:
+        benchmark = result.data
+    if benchmark.empty:
+        log.warning(f"基准 {parameters.benchmark} 没有行情，不输出基准列")
+        return portfolios
+    benchmark["tradeDate"] = benchmark.time.dt.date
+    portfolios = portfolios.merge(
+        benchmark[["tradeDate", "close"]].rename(columns={"close": "benchmarkClosePrice"}),
+        on="tradeDate",
+        how="left",
+        validate="one_to_one",
+    )
+    prices = portfolios.benchmarkClosePrice.where(
+        np.isfinite(portfolios.benchmarkClosePrice) & (portfolios.benchmarkClosePrice > 0)
+    )
+    portfolios["benchmarkClosePrice"] = prices
+    valid_prices = prices.dropna()
+    portfolios["benchmarkNetValue"] = (
+        prices / valid_prices.iloc[0] if not valid_prices.empty else np.nan
+    )
+    return portfolios
+
+
 def execute_backtest(
     algos: Sequence[Algo[Any, C]],
     ctx: C,
     parameters: A,
     settings: DolphinSettings,
     engine_type: type[ResearchBacktest[C]],
+    checkpoints: Checkpoints | None = None,
 ) -> BacktestResult[A]:
-    with engine_type(settings, parameters, ctx, algos) as engine:
-        engine.run(np.timedelta64(parameters.batch_days, "D"))
-        portfolios = records_frame(engine.get_daily_total_portfolios(), DailyPortfolio)
-        if parameters.benchmark and not portfolios.empty:
-            with query(
-                {
-                    "start_date": parameters.start.isoformat(),
-                    "end_date": (parameters.end - timedelta(days=1)).isoformat(),
-                    "codes": [source_symbol(parameters.benchmark)],
-                    "factors": ["close"],
-                },
-                session=engine.session,
-                settings=settings,
-            ) as result:
-                benchmark = result.data
-            if benchmark.empty:
-                log.warning(f"基准 {parameters.benchmark} 没有行情，不输出基准列")
-            else:
-                benchmark["tradeDate"] = benchmark.time.dt.date
-                portfolios = portfolios.merge(
-                    benchmark[["tradeDate", "close"]].rename(
-                        columns={"close": "benchmarkClosePrice"}
-                    ),
-                    on="tradeDate",
-                    how="left",
-                    validate="one_to_one",
-                )
-                prices = portfolios.benchmarkClosePrice.where(
-                    np.isfinite(portfolios.benchmarkClosePrice)
-                    & (portfolios.benchmarkClosePrice > 0)
-                )
-                portfolios["benchmarkClosePrice"] = prices
-                valid_prices = prices.dropna()
-                portfolios["benchmarkNetValue"] = (
-                    prices / valid_prices.iloc[0] if not valid_prices.empty else np.nan
-                )
-        diagnostics = [row for algo in algos for row in algo.diagnostics]
-        return BacktestResult(
-            trade_details=records_frame(engine.get_trade_details(), TradeDetail),
-            daily_positions=records_frame(engine.get_daily_position(), DailyPosition),
-            daily_portfolios=portfolios,
-            daily_trading_statistics=records_frame(
-                engine.get_daily_trading_statistics(), DailyTradingStatistics
-            ),
-            allocation_diagnostics=pd.DataFrame(diagnostics, columns=["time", "method", "reason"]),
-            parameters=parameters.model_copy(deep=True),
-        )
+    # 引擎状态保存在 DolphinDB 回测插件中，回放只能整体复用，不能从中途批次继续。
+    records = checkpoints.load("backtest") if checkpoints is not None else None
+    if records is not None and not (isinstance(records, dict) and RECORDS <= records.keys()):
+        log.warning("[检查点] 回测回放结果格式不符，重新回放")
+        records = None
+    if records is None:
+        with engine_type(settings, parameters, ctx, algos) as engine:
+            engine.run(np.timedelta64(parameters.batch_days, "D"))
+            diagnostics = [row for algo in algos for row in algo.diagnostics]
+            records = {
+                "trade_details": records_frame(engine.get_trade_details(), TradeDetail),
+                "daily_positions": records_frame(engine.get_daily_position(), DailyPosition),
+                "daily_portfolios": records_frame(
+                    engine.get_daily_total_portfolios(), DailyPortfolio
+                ),
+                "daily_trading_statistics": records_frame(
+                    engine.get_daily_trading_statistics(), DailyTradingStatistics
+                ),
+                "allocation_diagnostics": pd.DataFrame(
+                    diagnostics, columns=["time", "method", "reason"]
+                ),
+            }
+            if checkpoints is not None:
+                checkpoints.save("backtest", records)
+            portfolios = with_benchmark(
+                records["daily_portfolios"], parameters, settings, engine.session
+            )
+    else:
+        portfolios = with_benchmark(records["daily_portfolios"], parameters, settings, None)
+    return BacktestResult(
+        trade_details=records["trade_details"],
+        daily_positions=records["daily_positions"],
+        daily_portfolios=portfolios,
+        daily_trading_statistics=records["daily_trading_statistics"],
+        allocation_diagnostics=records["allocation_diagnostics"],
+        parameters=parameters.model_copy(deep=True),
+    )

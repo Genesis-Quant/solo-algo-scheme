@@ -11,6 +11,7 @@ from scheme.config import DolphinSettings
 from scheme.data import query
 from scheme.data.dolphindb.database.session import open_session, release, upload
 from scheme.data.dolphindb.symbols import engine_symbol, source_symbol
+from scheme.execute.checkpoints import Checkpoints
 
 from .result import FactorAnalysisResult
 
@@ -104,6 +105,7 @@ def analyze_factors(
     parameters: A,
     *,
     settings: DolphinSettings | None = None,
+    checkpoints: Checkpoints | None = None,
 ) -> FactorAnalysisResult[A]:
     parameters.bind_columns(factor)
     if factor.params.groups != parameters.groups:
@@ -113,9 +115,13 @@ def analyze_factors(
         f"[分析] {parameters.start} 至 {parameters.end}，因子={parameters.columns}，"
         f"收益={parameters.return_columns}，分组={parameters.groups}，加权={parameters.weight}"
     )
-    panel = validate_result(
-        factor.compute(parameters.start, parameters.end), parameters.columns, "因子分析"
-    )
+    panel = checkpoints.load("factor") if checkpoints is not None else None
+    restored = panel is not None
+    if panel is None:
+        panel = factor.compute(parameters.start, parameters.end)
+    panel = validate_result(panel, parameters.columns, "因子分析")
+    if checkpoints is not None and not restored:
+        checkpoints.save("factor", panel)
     source = panel.reset_index().rename(columns={"date": "time", "symbol": "code"})
     source["time"] = pd.to_datetime(source["time"])
     source = source[
