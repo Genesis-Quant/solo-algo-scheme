@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any, Generic, TypeVar
 
 from pydantic import Field
-from runtime.utils import logger as log
 
 from scheme.base.internal.context import ResearchContext
 from scheme.base.internal.types import Order, Target
@@ -26,14 +25,7 @@ class NoControl(ControlAlgo[ControlParams, C], Generic[C]):
         super().__init__(params if params is not None else ControlParams())
 
     def on_target(self, target: Target) -> None:
-        orders = self.target_orders(target)
-        buys = sum(order.direction.name.startswith("BUY") for order in orders)
-        sells = sum(order.direction.name.startswith("SELL") for order in orders)
-        log.debug(
-            f"目标 {sum(bool(weight) for weight in target.values())} 只，"
-            f"订单 {len(orders)} 笔（买入 {buys}，卖出 {sells}）"
-        )
-        self.ctx.orders = orders
+        self.ctx.orders = self.target_orders(target)
 
     def target_orders(self, target: Target) -> list[Order]:
         return super().target_orders(target, lot_size=self.params.lot_size)

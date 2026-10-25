@@ -85,7 +85,6 @@ def open_session(settings: DolphinSettings) -> Any:
                     message = error_text(error, settings.password.get_secret_value())
                     log.warning(f"[连接] DolphinDB {endpoint} 失败会话关闭异常：{message}")
         if connected:
-            log.info(f"[连接] DolphinDB 已连接 {endpoint}，会话 {session.session_id}")
             return session
     raise ConnectionError(f"所有 DolphinDB 端点均连接失败：{'；'.join(failures)}") from None
 

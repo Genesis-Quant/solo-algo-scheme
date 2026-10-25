@@ -6,7 +6,6 @@ from datetime import time
 from typing import Any, Generic, TypeVar
 
 import pandas as pd
-from runtime.utils import logger as log
 
 from scheme.base.internal.context import ResearchContext
 from scheme.base.internal.types import Order
@@ -34,7 +33,6 @@ class DirectExecution(ExecutionAlgo[DefaultParams, C], Generic[C]):
 
     def on_orders(self, orders: list[Order]) -> None:
         now = pd.Timestamp(self.backtest.time).to_pydatetime()
-        for pending in orders:
-            order = pending.model_copy(update={"time": now})
-            self.backtest.submit_order(order)
-        log.debug(f"直接提交 {len(orders)} 笔订单")
+        self.backtest.submit_orders(
+            [pending.model_copy(update={"time": now}) for pending in orders]
+        )

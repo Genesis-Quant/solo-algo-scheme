@@ -1,22 +1,18 @@
-"""研究事件调度、回测进度及统一数据交互。"""
+"""研究事件调度和当前行情、账户快照。"""
 
 from collections.abc import Sequence
-from dataclasses import dataclass
-from functools import cached_property
 from math import isfinite
 from typing import Any, Generic, TypeVar
 
-import numpy as np
-import pandas as pd
 from backtest import Backtest as BaseBacktest
-from backtest import DailyPortfolio, DosVar, OrderStatus
+from backtest import DosVar, Position
 from pydantic import BaseModel
 from runtime.utils import logger as log
 
 from scheme._errors import error_text
 from scheme.base import Algo, Order
 from scheme.config import DolphinSettings
-from scheme.data.dolphindb.database.session import download, open_session, release, upload
+from scheme.data.dolphindb.database.session import download, open_session, release
 from scheme.data.dolphindb.symbols import engine_symbol, normalize_order
 
 __all__ = ["Backtest"]
@@ -24,14 +20,34 @@ __all__ = ["Backtest"]
 C = TypeVar("C", bound=BaseModel, infer_variance=True)
 
 
-@dataclass
-class Progress:
-    month: pd.Period | None = None
-    net_value: float | None = 1.0
-    orders: int = 0
-    trades: int = 0
-    rejected: int = 0
-    finishing: bool = False
+class EngineSession:
+    """直接执行 DOS 可能改变账户和事件队列，快照只能在下一次响应后重新确认。"""
+
+    def __init__(self, session: Any, owner: Any) -> None:
+        self.raw = session
+        self.owner = owner
+
+    def run(self, *args: Any, **kwargs: Any) -> Any:
+        self.owner.flush_pending_events(session=self.raw)
+        self.owner.invalidate_snapshot()
+        return self.raw.run(*args, **kwargs)
+
+    def upload(self, *args: Any, **kwargs: Any) -> Any:
+        self.owner.flush_pending_events(session=self.raw)
+        self.owner.invalidate_snapshot()
+        return self.raw.upload(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        value = getattr(self.raw, name)
+        if not callable(value):
+            return value
+
+        def invoke(*args: Any, **kwargs: Any) -> Any:
+            self.owner.flush_pending_events(session=self.raw)
+            self.owner.invalidate_snapshot()
+            return value(*args, **kwargs)
+
+        return invoke
 
 
 class Backtest(BaseBacktest[C], Generic[C]):
@@ -47,6 +63,8 @@ class Backtest(BaseBacktest[C], Generic[C]):
         algos: Sequence[Algo[Any, C]] = (),
     ) -> None:
         self.settings = settings
+        self.latest_prices: dict[str, float] = {}
+        self._account_snapshot: dict[str, Any] | None = None
         super().__init__(
             session=open_session(settings),
             engine_name=engine_name,
@@ -54,75 +72,37 @@ class Backtest(BaseBacktest[C], Generic[C]):
             ctx=ctx,
             algos=algos,
         )
+        self.session = EngineSession(self.session, self)
+        self.trusted_event_cache = True
+        self.deferred_trade_ack = True
+
+    def invalidate_snapshot(self) -> None:
+        self._account_snapshot = None
+        self.invalidate_events()
 
     def release(self, variables: Sequence[str]) -> None:
         release(self.session, variables)
 
-    @cached_property
-    def latest_prices(self) -> dict[str, float]:
-        return {}
+    def snapshot_fields(self, msg: DosVar) -> dict[str, str]:
+        return {
+            "prices": f"(exec dict(string(symbol), lastPrice) from {msg})",
+            "equity": "(exec first(totalEquity) from Backtest::getTotalPortfolios(engine))",
+            "positions": "(def(records) { return dict(records.columnNames(), records.values()) })"
+            "(Backtest::getPosition(engine))",
+        }
 
-    @cached_property
-    def progress(self) -> Progress:
-        return Progress()
-
-    def advance(self, msg: DosVar) -> None:
-        super().advance(msg)
-        if self.progress.finishing:
-            return
-        self.report_month(pd.Timestamp(self.time))
-        prices = download(
-            self.session, f"exec dict(string(symbol), lastPrice) from {msg}", "当前行情价格"
-        )
-        for symbol, price in prices.items():
+    def on_advance(self, snapshot: dict[str, Any]) -> None:
+        super().on_advance(snapshot)
+        self._account_snapshot = snapshot
+        for symbol, price in snapshot.get("prices", {}).items():
             if price is not None and isfinite(price) and price > 0:
                 self.latest_prices[symbol] = float(price)
 
     def finish(self, msg: DosVar) -> None:
-        self.progress.finishing = True
         try:
             super().finish(msg)
         finally:
-            self.progress.finishing = False
             self.release(["soloMessages"])
-
-    def report_month(self, moment: pd.Timestamp) -> None:
-        progress = self.progress
-        month = moment.to_period("M")
-        if progress.month is None or month == progress.month:
-            progress.month = month
-            return
-        try:
-            upload(
-                self.session, {"progressDate": np.datetime64(moment.date(), "D")}, "回测月报截止日"
-            )
-            portfolios = self.get_records(
-                "select top 1 * from Backtest::getDailyTotalPortfolios(engine) "
-                "where tradeDate < progressDate order by tradeDate desc",
-                DailyPortfolio,
-            )
-        finally:
-            self.release(["progressDate"])
-        if portfolios:
-            latest = portfolios[0]
-            positions = sum(
-                item.longPosition > 0 or item.shortPosition > 0
-                for item in self.get_position().values()
-            )
-            monthly = (
-                f"{latest.netValue / progress.net_value - 1:+.2%}"
-                if progress.net_value is not None and progress.net_value > 0
-                else "不可用"
-            )
-            cash = latest.cash / latest.totalEquity if latest.totalEquity else 0.0
-            log.info(
-                f"[月报] {progress.month}：净值 {latest.netValue:.4f}（本月 {monthly}），"
-                f"持仓 {positions} 只，现金 {cash:.1%}；"
-                f"订单 {progress.orders}，成交 {progress.trades}，拒单 {progress.rejected}"
-            )
-            progress.net_value = latest.netValue
-        progress.month = month
-        progress.orders = progress.trades = progress.rejected = 0
 
     def get_prices(self, symbols: Sequence[str]) -> dict[str, float]:
         return {
@@ -131,28 +111,38 @@ class Backtest(BaseBacktest[C], Generic[C]):
             if symbol in self.latest_prices
         }
 
-    def submit_order(self, order: Order) -> int:
-        identifier = super().submit_order(normalize_order(order))
-        self.progress.orders += 1
-        return identifier
+    def get_equity(self) -> float:
+        if self._account_snapshot is not None:
+            return float(self._account_snapshot["equity"])
+        return float(
+            download(
+                self.session,
+                "exec first(totalEquity) from Backtest::getTotalPortfolios(engine)",
+                "当前账户权益",
+            )
+        )
+
+    def get_position(self) -> dict[str, Position]:
+        if self._account_snapshot is None:
+            return super().get_position()
+        columns = self._account_snapshot["positions"]
+        return {
+            position.symbol: position
+            for row in zip(*columns.values(), strict=True)
+            for position in [Position.model_validate(dict(zip(columns, row, strict=True)))]
+        }
+
+    def submit_orders(self, orders: Sequence[Order]) -> list[int]:
+        self._account_snapshot = None
+        return super().submit_orders([normalize_order(order) for order in orders])
 
     def cancel_order(
         self, symbol: str = "", orders: Sequence[int] | None = None, label: str = ""
     ) -> None:
+        self._account_snapshot = None
         super().cancel_order(engine_symbol(symbol), orders, label)
 
     def on_event(self, callback: str, payload: Any) -> None:
-        if callback == "on_order":
-            for report in payload:
-                if report.status == OrderStatus.REJECTED:
-                    self.progress.rejected += 1
-                    price = f"{report.price:.2f}" if report.price else "市价"
-                    log.warning(
-                        f"拒单 #{report.orderId}：{report.updateTime}，{report.symbol} "
-                        f"{report.direction.name} {report.qty} 股 @ {price}；插件回报未提供拒单原因"
-                    )
-        elif callback == "on_trade":
-            self.progress.trades += len(payload)
         try:
             super().on_event(callback, payload)
             while True:

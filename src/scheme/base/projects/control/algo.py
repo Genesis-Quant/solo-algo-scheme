@@ -7,12 +7,10 @@ import numpy as np
 import pandas as pd
 from backtest import Direction, MarketOrder
 from pydantic import BaseModel
-from runtime.utils import logger as log
 
 from scheme.base.internal.algo import Algo
 from scheme.base.internal.context import ResearchContext
 from scheme.base.internal.types import Order, Target
-from scheme.data.dolphindb.database.session import download
 from scheme.data.dolphindb.symbols import normalize_assets
 
 __all__ = ["ControlAlgo"]
@@ -53,18 +51,16 @@ class ControlAlgo(Algo[P, C], Generic[P, C]):
                 if s not in prices or not np.isfinite(prices[s]) or prices[s] <= 0
             }
             if skipped:
-                log.warning(
-                    f"目标证券截至当前时点尚无有效价格，跳过 {len(skipped)} 只下单，保持现有持仓"
+                self.diagnostics.append(
+                    {
+                        "time": pd.Timestamp(self.backtest.time),
+                        "method": "missing_price",
+                        "reason": f"跳过 {len(skipped)} 只截至当前时点无有效价格的证券，保持现有持仓",
+                    }
                 )
             symbols = [s for s in symbols if s not in skipped]
         if symbols:
-            equity = float(
-                download(
-                    self.backtest.session,
-                    "exec first(totalEquity) from Backtest::getTotalPortfolios(engine)",
-                    "当前账户权益",
-                )
-            )
+            equity = self.backtest.get_equity()
             if not np.isfinite(equity) or equity <= 0:
                 raise ValueError("账户权益必须为正数，不能据此将目标权重转换为股数")
             lot = lot_size

@@ -9,7 +9,6 @@ from typing import Any, Generic, TypeVar
 import numpy as np
 import pandas as pd
 from pydantic import Field
-from runtime.utils import logger as log
 from scipy.optimize import minimize
 
 from scheme.base.internal.context import ResearchContext
@@ -76,17 +75,23 @@ class RiskParity(OptimizeAlgo[OptimizeParams, C], Generic[C]):
         if not symbols:
             return {}
         today = pd.Timestamp(self.backtest.time).date()
-        with query(
-            {
-                "start_date": (today - timedelta(days=self.params.lookback_days)).isoformat(),
-                "end_date": (today - timedelta(days=1)).isoformat(),
-                "codes": [source_symbol(s) for s in symbols],
-                "factors": ["close", "adj_factor"],
-            },
-            session=self.backtest.session,
-            settings=self.backtest.settings,
-        ) as result:
-            history = result.data
+        start = today - timedelta(days=self.params.lookback_days)
+        end = today - timedelta(days=1)
+        prepared = getattr(self.backtest, "history", None)
+        if prepared is not None:
+            history = prepared.query(start, end, symbols)
+        else:
+            with query(
+                {
+                    "start_date": start.isoformat(),
+                    "end_date": end.isoformat(),
+                    "codes": [source_symbol(s) for s in symbols],
+                    "factors": ["close", "adj_factor"],
+                },
+                session=self.backtest.session,
+                settings=self.backtest.settings,
+            ) as result:
+                history = result.data
         history["code"] = history.code.map(engine_symbol)
         if history.empty or not {"close", "adj_factor"}.issubset(history.columns):
             returns = pd.DataFrame(columns=symbols, dtype=float)
@@ -110,12 +115,4 @@ class RiskParity(OptimizeAlgo[OptimizeParams, C], Generic[C]):
                 "reason": reason,
             }
         )
-        if reason:
-            log.warning(f"风险平价退化为等权：{reason}（{len(symbols)} 只）")
-        else:
-            maximum = max((abs(value) for value in target.values()), default=0.0)
-            log.debug(
-                f"风险平价分配 {len(symbols)} 只，总仓位 {self.params.gross_exposure:.0%}，"
-                f"最大权重 {maximum:.2%}"
-            )
         return target

@@ -27,6 +27,7 @@ from scheme.data.dolphindb.symbols import engine_symbol, source_symbol
 from scheme.execute.checkpoints import Checkpoints
 from scheme.execute.strategy.assembly import validate_context
 from scheme.execute.strategy.engine import Backtest
+from scheme.execute.strategy.history import History, history_scope
 
 from .result import BacktestResult
 
@@ -39,9 +40,6 @@ def dailyMessages(daily, request) {
     valid = select * from daily
         where !isNull(open), !isNull(close), !isNull(pre_close), !isNull(up_limit), !isNull(down_limit),
               open > 0, close > 0, pre_close > 0, up_limit > 0, down_limit > 0
-    if (valid.rows() != daily.rows()) {
-        print("[DOS 行情] 跳过缺价或非正价格记录：" + string(daily.rows() - valid.rows()))
-    }
     if (valid.rows() == 0) return table(array(TIMESTAMP, 0) as timestamp)
     openRows = select
             strReplace(strReplace(string(code), ".SH", ".XSHG"), ".SZ", ".XSHE") as code,
@@ -205,15 +203,64 @@ class ResearchBacktest(Backtest[BacktestC], Generic[BacktestC]):
                 if parameters.symbols is not None
                 else self.universe.columns[self.universe.any(axis=0)].tolist()
             )
+            history_codes = list(dict.fromkeys([*self.symbols, *self.universe.columns]))
+            lookback = max(60, *(int(getattr(algo.params, "lookback_days", 0)) for algo in algos))
+            self.history = History(
+                self.session,
+                settings,
+                parameters.start,
+                parameters.end,
+                [source_symbol(code) for code in history_codes],
+                lookback_days=lookback,
+                clock=lambda: self.time,
+            )
+            self._daily_timeline: np.ndarray | None = None
         except BaseException:
             try:
                 self.close()
             except Exception as error:
                 log.warning(f"[回测] 初始化失败后关闭引擎异常：{error_text(error)}")
             raise
-        log.info(f"[回测] 引擎已就绪：行情证券 {len(self.symbols)} 只，算法 {len(algos)} 个")
+
+    def load_timeline(
+        self, message: DosVar, start: np.datetime64, end: np.datetime64
+    ) -> Sequence[np.datetime64]:
+        if self._daily_timeline is None:
+            return super().load_timeline(message, start, end)
+        return self._daily_timeline[(self._daily_timeline >= start) & (self._daily_timeline < end)]
+
+    def _prepare_daily_messages(self) -> DosVar:
+        start = np.datetime64(self.parameters.start, "ms")
+        end = np.datetime64(self.parameters.end, "ms")
+        if not self.symbols:
+            self.session.run("soloMessages = table(array(TIMESTAMP, 0) as timestamp); NULL")
+            self._daily_timeline = np.array([], dtype="datetime64[ms]")
+            return DosVar("soloMessages")
+        with query(
+            {
+                "start_date": self.parameters.start.isoformat(),
+                "end_date": (self.parameters.end - timedelta(days=1)).isoformat(),
+                "codes": [source_symbol(code) for code in self.symbols],
+                "factors": ["open", "close", "pre_close", "up_limit", "down_limit"],
+            },
+            session=self.session,
+            settings=self.settings,
+        ) as result:
+            self.session.run(MARKET_SCRIPT)
+            timeline = self.session.run(
+                f"soloMessages = dailyMessages({result.data_ref}, "
+                f"dict(`start`end, [timestamp({int(start.astype('int64'))}), "
+                f"timestamp({int(end.astype('int64'))})])); "
+                "sort(distinct(soloMessages.timestamp))"
+            )
+        self._daily_timeline = np.asarray(timeline, dtype="datetime64[ms]")
+        return DosVar("soloMessages")
 
     def load_messages(self, start: np.datetime64, end: np.datetime64) -> DosVar:
+        if self.parameters.market_data == "stock_daily":
+            if self._daily_timeline is None:
+                return self._prepare_daily_messages()
+            return DosVar("soloMessages")
         symbols = [engine_symbol(symbol) for symbol in self.symbols]
         if not symbols:
             self.session.run("soloMessages = table(array(TIMESTAMP, 0) as timestamp); NULL")
@@ -233,11 +280,14 @@ class ResearchBacktest(Backtest[BacktestC], Generic[BacktestC]):
             "factors": fields,
         }
         try:
-            with query(
-                request,
-                session=self.session,
-                settings=self.settings,
-            ) as result:
+            with (
+                history_scope(None),
+                query(
+                    request,
+                    session=self.session,
+                    settings=self.settings,
+                ) as result,
+            ):
                 self.session.run(MARKET_SCRIPT)
                 if self.parameters.market_data == "stock_snapshot":
                     upload(
@@ -286,10 +336,6 @@ class ResearchBacktest(Backtest[BacktestC], Generic[BacktestC]):
         )
         self.loaded_dates.update(pd.DatetimeIndex(days).date)
         self.loaded_rows += message_rows
-        log.info(
-            f"[行情] [{start}, {end}) 已加载：{message_rows} 条报价，"
-            f"累计 {len(self.loaded_dates)} 个交易日、{self.loaded_rows} 条报价"
-        )
         return DosVar("soloMessages")
 
     @cached_property
@@ -450,7 +496,11 @@ def execute_backtest(
         records = None
     if records is None:
         with engine_type(settings, parameters, ctx, algos) as engine:
-            engine.run(np.timedelta64(parameters.batch_days, "D"))
+            engine.history.prepare()
+            if parameters.market_data == "stock_daily":
+                engine._prepare_daily_messages()
+            with history_scope(engine.history):
+                engine.run(np.timedelta64(parameters.batch_days, "D"))
             diagnostics = [row for algo in algos for row in algo.diagnostics]
             records = {
                 "trade_details": records_frame(engine.get_trade_details(), TradeDetail),
