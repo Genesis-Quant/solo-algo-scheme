@@ -75,23 +75,17 @@ class RiskParity(OptimizeAlgo[OptimizeParams, C], Generic[C]):
         if not symbols:
             return {}
         today = pd.Timestamp(self.backtest.time).date()
-        start = today - timedelta(days=self.params.lookback_days)
-        end = today - timedelta(days=1)
-        prepared = getattr(self.backtest, "history", None)
-        if prepared is not None:
-            history = prepared.query(start, end, symbols)
-        else:
-            with query(
-                {
-                    "start_date": start.isoformat(),
-                    "end_date": end.isoformat(),
-                    "codes": [source_symbol(s) for s in symbols],
-                    "factors": ["close", "adj_factor"],
-                },
-                session=self.backtest.session,
-                settings=self.backtest.settings,
-            ) as result:
-                history = result.data
+        with query(
+            {
+                "start_date": (today - timedelta(days=self.params.lookback_days)).isoformat(),
+                "end_date": (today - timedelta(days=1)).isoformat(),
+                "codes": [source_symbol(s) for s in symbols],
+                "factors": ["close", "adj_factor"],
+            },
+            session=self.backtest.session,
+            settings=self.backtest.settings,
+        ) as result:
+            history = result.data
         history["code"] = history.code.map(engine_symbol)
         if history.empty or not {"close", "adj_factor"}.issubset(history.columns):
             returns = pd.DataFrame(columns=symbols, dtype=float)

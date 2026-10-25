@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from scheme.base.internal.algo import Algo
 from scheme.base.internal.context import ResearchContext
 from scheme.base.internal.types import Order, Target
+from scheme.data.dolphindb.database.session import download
 from scheme.data.dolphindb.symbols import normalize_assets
 
 __all__ = ["ControlAlgo"]
@@ -60,7 +61,13 @@ class ControlAlgo(Algo[P, C], Generic[P, C]):
                 )
             symbols = [s for s in symbols if s not in skipped]
         if symbols:
-            equity = self.backtest.get_equity()
+            equity = float(
+                download(
+                    self.backtest.session,
+                    "exec first(totalEquity) from Backtest::getTotalPortfolios(engine)",
+                    "当前账户权益",
+                )
+            )
             if not np.isfinite(equity) or equity <= 0:
                 raise ValueError("账户权益必须为正数，不能据此将目标权重转换为股数")
             lot = lot_size

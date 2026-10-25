@@ -3,7 +3,6 @@
 import json
 from datetime import timedelta
 from typing import Any
-from uuid import uuid4
 
 import numpy as np
 from runtime.apps.query import FactorQuery
@@ -28,23 +27,6 @@ def buildQuery(request) {
         order by timestamp(date(time))
     if (size(calendar) == 0) throw "查询区间没有交易日历"
 
-    codes = request.codes
-    if (size(request.factors) == 1 && size(request.weights) == 1 &&
-            size(request.filters) == 1 && request.filters[0] == "stock_pool_member") {
-        column = request.weights[0]
-        definitions = fromStdJson(request.definitions)
-        node = definitions["stock_pool_member"]
-        if (size(definitions) == 1 && node.type == "DIRECT" && node.op == "binary.gt" &&
-                node.fields.left == column && node.fields.right == 0) {
-            priorDate = exec max(time) from sourceTable
-                where factor = symbol([column])[0], time < request.start
-            candidates = exec distinct string(code) from sourceTable
-                where factor = symbol([column])[0], value > 0,
-                      ((time >= request.start && time < request.end) || time == priorDate)
-            selectedCodes = codes[codes in candidates]
-            if (size(selectedCodes)) codes = selectedCodes
-        }
-    }
     timeline = calendar
     for (column in request.weights) {
         observedDates = exec distinct timestamp(time) from sourceTable
@@ -53,7 +35,7 @@ def buildQuery(request) {
     }
     source = build_factor_source(
         sourceTable,
-        codes,
+        request.codes,
         request.factors,
         timeline,
         request.start,
@@ -181,96 +163,14 @@ class QueryResult:
         return False
 
 
-class CachedQueryResult(QueryResult):
-    """回测历史切片保留原查询接口，仅在需要 DOS 引用时上传到当前会话。"""
-
-    def __init__(self, data: Any, calendar: Any, session: Any) -> None:
-        self.session = session
-        self.owns_session = False
-        self.closed = False
-        self._data = data
-        self._calendar = np.asarray(calendar, dtype="datetime64[ms]")
-        suffix = uuid4().hex
-        self._data_ref = "historyData_" + suffix
-        self._calendar_ref = "historyDates_" + suffix
-        self._materialized = False
-
-    def _materialize(self) -> None:
-        if self.closed:
-            raise RuntimeError("查询结果已关闭")
-        if not self._materialized:
-            upload(
-                self.session,
-                {self._data_ref: self._data, self._calendar_ref: self._calendar},
-                "历史查询切片",
-            )
-            self._materialized = True
-
-    @property
-    def data_ref(self) -> str:
-        self._materialize()
-        return self._data_ref
-
-    @property
-    def calendar_ref(self) -> str:
-        self._materialize()
-        return self._calendar_ref
-
-    @property
-    def data(self) -> Any:
-        if self.closed:
-            raise RuntimeError("查询结果已关闭")
-        return (
-            download(self.session, self._data_ref, "历史查询切片")
-            if self._materialized
-            else self._data.copy()
-        )
-
-    @property
-    def calendar(self) -> Any:
-        if self.closed:
-            raise RuntimeError("查询结果已关闭")
-        return (
-            download(self.session, self._calendar_ref, "历史交易日历")
-            if self._materialized
-            else self._calendar.copy()
-        )
-
-    def close(self) -> None:
-        if not self.closed:
-            if self._materialized:
-                release(self.session, [self._data_ref, self._calendar_ref])
-            self.closed = True
-
-
 def query(
     request: FactorQuery | dict[str, Any],
     *,
     session: Any | None = None,
     settings: DolphinSettings | None = None,
 ) -> QueryResult:
-    from scheme.execute.strategy.history import current_history
-
-    history = current_history()
-    validated = query_api.validate_factor_query(request)
-    if (
-        history is not None
-        and (session is None or session is history.session)
-        and (settings is None or settings == history.settings)
-    ):
-        data = history.get(validated)
-        if data is not None:
-            calendar = history.calendar
-            calendar = calendar[
-                (calendar >= np.datetime64(validated.start_date, "D"))
-                & (calendar <= np.datetime64(validated.end_date, "D"))
-            ]
-            return CachedQueryResult(data, calendar, history.session)
-        if session is None:
-            session = history.session
-        if settings is None:
-            settings = history.settings
     settings = settings if settings is not None else DolphinSettings.from_env()
+    validated = query_api.validate_factor_query(request)
     start, end = query_api.normalize_date_range(validated.start_date, validated.end_date)
     factors = validated.source_factors()
     if unknown := set(factors) - set(query_api.available_factors()):

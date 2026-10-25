@@ -27,7 +27,6 @@ from scheme.data.dolphindb.symbols import engine_symbol, source_symbol
 from scheme.execute.checkpoints import Checkpoints
 from scheme.execute.strategy.assembly import validate_context
 from scheme.execute.strategy.engine import Backtest
-from scheme.execute.strategy.history import History, history_scope
 
 from .result import BacktestResult
 
@@ -190,6 +189,7 @@ class ResearchBacktest(Backtest[BacktestC], Generic[BacktestC]):
                 config[key] = np.int32(value)
         self.loaded_rows = 0
         self.loaded_dates: set[object] = set()
+        self._loaded_daily_batches: set[tuple[np.datetime64, np.datetime64]] = set()
         super().__init__(
             settings,
             engine_name=uuid4().hex,
@@ -202,17 +202,6 @@ class ResearchBacktest(Backtest[BacktestC], Generic[BacktestC]):
                 list(parameters.symbols)
                 if parameters.symbols is not None
                 else self.universe.columns[self.universe.any(axis=0)].tolist()
-            )
-            history_codes = list(dict.fromkeys([*self.symbols, *self.universe.columns]))
-            lookback = max(60, *(int(getattr(algo.params, "lookback_days", 0)) for algo in algos))
-            self.history = History(
-                self.session,
-                settings,
-                parameters.start,
-                parameters.end,
-                [source_symbol(code) for code in history_codes],
-                lookback_days=lookback,
-                clock=lambda: self.time,
             )
             self._daily_timeline: np.ndarray | None = None
         except BaseException:
@@ -233,9 +222,10 @@ class ResearchBacktest(Backtest[BacktestC], Generic[BacktestC]):
         start = np.datetime64(self.parameters.start, "ms")
         end = np.datetime64(self.parameters.end, "ms")
         if not self.symbols:
-            self.session.run("soloMessages = table(array(TIMESTAMP, 0) as timestamp); NULL")
+            self.session.run("soloDailyMessages = table(array(TIMESTAMP, 0) as timestamp); NULL")
             self._daily_timeline = np.array([], dtype="datetime64[ms]")
-            return DosVar("soloMessages")
+            self._daily_counts = np.array([], dtype=np.int64)
+            return DosVar("soloDailyMessages")
         with query(
             {
                 "start_date": self.parameters.start.isoformat(),
@@ -248,18 +238,30 @@ class ResearchBacktest(Backtest[BacktestC], Generic[BacktestC]):
         ) as result:
             self.session.run(MARKET_SCRIPT)
             timeline = self.session.run(
-                f"soloMessages = dailyMessages({result.data_ref}, "
+                f"soloDailyMessages = dailyMessages({result.data_ref}, "
                 f"dict(`start`end, [timestamp({int(start.astype('int64'))}), "
                 f"timestamp({int(end.astype('int64'))})])); "
-                "sort(distinct(soloMessages.timestamp))"
+                "select count(*) as quotes from soloDailyMessages group by timestamp order by timestamp"
             )
-        self._daily_timeline = np.asarray(timeline, dtype="datetime64[ms]")
-        return DosVar("soloMessages")
+        self._daily_timeline = np.asarray(timeline["timestamp"], dtype="datetime64[ms]")
+        self._daily_counts = np.asarray(timeline["quotes"], dtype=np.int64)
+        return DosVar("soloDailyMessages")
 
     def load_messages(self, start: np.datetime64, end: np.datetime64) -> DosVar:
         if self.parameters.market_data == "stock_daily":
             if self._daily_timeline is None:
-                return self._prepare_daily_messages()
+                self._prepare_daily_messages()
+            batch = (start, end)
+            if batch not in self._loaded_daily_batches:
+                mask = (self._daily_timeline >= start) & (self._daily_timeline < end)
+                self.loaded_rows += int(self._daily_counts[mask].sum())
+                self.loaded_dates.update(pd.DatetimeIndex(self._daily_timeline[mask]).date)
+                self._loaded_daily_batches.add(batch)
+            self.session.run(
+                "soloMessages = select * from soloDailyMessages "
+                f"where timestamp >= timestamp({int(start.astype('int64'))}l), "
+                f"timestamp < timestamp({int(end.astype('int64'))}l); NULL"
+            )
             return DosVar("soloMessages")
         symbols = [engine_symbol(symbol) for symbol in self.symbols]
         if not symbols:
@@ -280,14 +282,11 @@ class ResearchBacktest(Backtest[BacktestC], Generic[BacktestC]):
             "factors": fields,
         }
         try:
-            with (
-                history_scope(None),
-                query(
-                    request,
-                    session=self.session,
-                    settings=self.settings,
-                ) as result,
-            ):
+            with query(
+                request,
+                session=self.session,
+                settings=self.settings,
+            ) as result:
                 self.session.run(MARKET_SCRIPT)
                 if self.parameters.market_data == "stock_snapshot":
                     upload(
@@ -496,11 +495,7 @@ def execute_backtest(
         records = None
     if records is None:
         with engine_type(settings, parameters, ctx, algos) as engine:
-            engine.history.prepare()
-            if parameters.market_data == "stock_daily":
-                engine._prepare_daily_messages()
-            with history_scope(engine.history):
-                engine.run(np.timedelta64(parameters.batch_days, "D"))
+            engine.run(np.timedelta64(parameters.batch_days, "D"))
             diagnostics = [row for algo in algos for row in algo.diagnostics]
             records = {
                 "trade_details": records_frame(engine.get_trade_details(), TradeDetail),
