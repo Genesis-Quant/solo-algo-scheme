@@ -16,9 +16,13 @@ C = TypeVar("C", bound=ResearchContext[Any], infer_variance=True)
 
 
 class ExecutionAlgo(Algo[P, C], Generic[P, C]):
+    def can_execute(self) -> bool:
+        """是否可在当前时点执行；Control 在换算目标股数前也使用此条件。"""
+        return True
+
     def process(self) -> bool:
         orders = self.ctx.orders
-        if orders is None:
+        if orders is None or not self.can_execute():
             return False
         self.ctx.orders = None
         self.on_orders(orders)

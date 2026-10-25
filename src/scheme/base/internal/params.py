@@ -137,6 +137,7 @@ class StrategyAnalysisParams(StrategyParams):
         for name in (set(expected) | set(self.model_extra or {})) - checked - analysis_fields:
             if name not in expected or name not in actual or actual[name] != expected[name]:
                 raise ValueError("分析参数必须与 Strategy 的运行参数一致")
+        algos, ctx = strategy.fresh()
         return scheme.execute.strategy.api.run_backtest(
-            strategy.algos, strategy.ctx, self, settings=settings
+            algos, ctx, self, settings=settings
         )

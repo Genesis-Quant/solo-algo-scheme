@@ -176,6 +176,7 @@ class Strategy(Generic[StrategyP, C]):
         execution: type[ExecutionAlgo[Any, C]] | None = None,
     ) -> None:
         self.ctx = ctx
+        self.initial_context = ctx.model_copy(deep=True)
         self.params = params
         components = (
             (model, Algo),
@@ -189,6 +190,12 @@ class Strategy(Generic[StrategyP, C]):
         self.algos: tuple[Algo[Any, C], ...] = tuple(
             cls(project_parameters(parameter_type(cls), params)) for cls, base in components
         )
+
+    def fresh(self) -> tuple[tuple[Algo[Any, C], ...], C]:
+        algos = tuple(
+            type(algo)(algo.params.model_copy(deep=True)) for algo in self.algos
+        )
+        return algos, self.initial_context.model_copy(deep=True)
 
     @cached_property
     def universe(self) -> pd.DataFrame:

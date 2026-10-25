@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from scheme.base.internal.algo import Algo
 from scheme.base.internal.context import ResearchContext
 from scheme.base.internal.types import Order, Target
+from scheme.base.projects.execution.algo import ExecutionAlgo
 from scheme.data.dolphindb.database.session import download
 from scheme.data.dolphindb.symbols import normalize_assets
 
@@ -24,6 +25,13 @@ class ControlAlgo(Algo[P, C], Generic[P, C]):
     def process(self) -> bool:
         target = self.ctx.target
         if target is None or self.ctx.orders is not None:
+            return False
+        if any(
+            isinstance(algo, ExecutionAlgo)
+            and type(algo).process is ExecutionAlgo.process
+            and not algo.can_execute()
+            for algo in self.backtest.algos
+        ):
             return False
         self.ctx.target = None
         self.on_target(target)
@@ -76,7 +84,8 @@ class ControlAlgo(Algo[P, C], Generic[P, C]):
                 for s in symbols
             }
         positions = self.backtest.get_position()
-        orders: list[Order] = []
+        closing_orders: list[Order] = []
+        opening_orders: list[Order] = []
         for symbol in sorted((set(positions) | target.keys()) - skipped):
             position = positions.get(symbol)
             long = position.longPosition if position else 0
@@ -91,6 +100,11 @@ class ControlAlgo(Algo[P, C], Generic[P, C]):
             ]
             for direction, quantity in changes:
                 if quantity:
+                    orders = (
+                        closing_orders
+                        if direction in (Direction.SELL_CLOSE, Direction.BUY_CLOSE)
+                        else opening_orders
+                    )
                     orders.append(
                         MarketOrder(
                             symbol=symbol,
@@ -99,4 +113,4 @@ class ControlAlgo(Algo[P, C], Generic[P, C]):
                             direction=direction,
                         )
                     )
-        return orders
+        return closing_orders + opening_orders

@@ -76,8 +76,8 @@ class Backtest(BaseBacktest[C], Generic[C]):
             )
         )
 
-    def send_orders(self, orders: Sequence[Order]) -> list[int]:
-        return super().send_orders([normalize_order(order) for order in orders])
+    def submit_order(self, order: Order) -> int:
+        return super().submit_order(normalize_order(order))
 
     def cancel_order(
         self, symbol: str = "", orders: Sequence[int] | None = None, label: str = ""

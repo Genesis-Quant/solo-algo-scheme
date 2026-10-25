@@ -25,11 +25,9 @@ class DirectExecution(ExecutionAlgo[DefaultParams, C], Generic[C]):
     def __init__(self, params: DefaultParams | None = None) -> None:
         super().__init__(params if params is not None else DefaultParams())
 
-    def process(self) -> bool:
+    def can_execute(self) -> bool:
         now = pd.Timestamp(self.backtest.time).time()
-        if not (time(9, 30) <= now < time(11, 30) or time(13) <= now < time(15)):
-            return False
-        return super().process()
+        return time(9, 30) <= now < time(11, 30) or time(13) <= now < time(15)
 
     def on_orders(self, orders: list[Order]) -> None:
         now = pd.Timestamp(self.backtest.time).to_pydatetime()
