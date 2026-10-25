@@ -10,8 +10,8 @@ from runtime.apps.query import api as query_api
 from runtime.utils import get_codes
 from runtime.utils import logger as log
 
-from scheme._errors import error_text
 from scheme.config import DolphinSettings
+from scheme.errors import error_text
 
 from .database.session import download, open_session, release, upload
 

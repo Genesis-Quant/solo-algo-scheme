@@ -10,8 +10,8 @@ import pandas as pd
 from backtest import DosVar
 from runtime.utils import logger as log
 
-from scheme._errors import error_text
 from scheme.config import DolphinSettings
+from scheme.errors import error_text
 
 from .params import FactorParams
 from .preprocess import preprocess

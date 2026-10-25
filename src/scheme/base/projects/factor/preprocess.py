@@ -10,11 +10,11 @@ from backtest import DosVar
 from runtime.apps.query import api as query_api
 from runtime.utils import logger as log
 
-from scheme._errors import error_text
 from scheme.config import DolphinSettings
 from scheme.data.dolphindb.api import QUERY_SCRIPT
 from scheme.data.dolphindb.database.session import create_session, download, release, upload
 from scheme.data.dolphindb.symbols import engine_symbol
+from scheme.errors import error_text
 
 RESERVED = {"time", "code", "date", "symbol", "stock_pool_member"}
 

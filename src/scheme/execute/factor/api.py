@@ -4,13 +4,13 @@ import numpy as np
 import pandas as pd
 from runtime.utils import logger as log
 
-from scheme._errors import error_text
 from scheme.base import Factor, FactorAnalysisParams, FactorParams
 from scheme.base.projects.factor.algo import validate_result
 from scheme.config import DolphinSettings
 from scheme.data import query
 from scheme.data.dolphindb.database.session import open_session, release, upload
 from scheme.data.dolphindb.symbols import engine_symbol, source_symbol
+from scheme.errors import error_text
 from scheme.execute.checkpoints import Checkpoints
 
 from .result import FactorAnalysisResult

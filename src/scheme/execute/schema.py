@@ -39,32 +39,13 @@ class FactorTask(Task):
 
 
 class AlgoTask(Task):
+    kind: Literal["model", "optimize", "control", "execution", "strategy"]
     algos: AlgoComponents[Package]
     context: str | None = Field(default=None, pattern=r"^[A-Za-z_][\w.]*:[A-Za-z_]\w*$")
     backtest: StrategyAnalysisParams
 
     @model_validator(mode="after")
     def require_research_component(self) -> Self:
-        if self.kind in {"model", "optimize", "control", "execution"} and getattr(self.algos, self.kind) is None:
+        if self.kind != "strategy" and getattr(self.algos, self.kind) is None:
             raise ValueError(f"{self.kind} 研究任务必须提供当前环节的 Algo")
         return self
-
-
-class ModelTask(AlgoTask):
-    kind: Literal["model"] = "model"
-
-
-class OptimizeTask(AlgoTask):
-    kind: Literal["optimize"] = "optimize"
-
-
-class ControlTask(AlgoTask):
-    kind: Literal["control"] = "control"
-
-
-class ExecutionTask(AlgoTask):
-    kind: Literal["execution"] = "execution"
-
-
-class StrategyTask(AlgoTask):
-    kind: Literal["strategy"] = "strategy"

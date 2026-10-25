@@ -3,12 +3,11 @@
 import argparse
 import json
 import sys
-from importlib import import_module
 from pathlib import Path
 
 from runtime.utils import logger as log
 
-from scheme._errors import error_text
+from scheme.errors import error_text
 
 from .parameters import inspect_project
 
@@ -60,7 +59,11 @@ def main(argv: list[str] | None = None) -> int:
             else None
         )
         checkpoints = Checkpoints.for_input(input_file, lockfile)
-        code = import_module(f"scheme.execute.{kind}.task").run(data, checkpoints=checkpoints)
+        if kind == "factor":
+            from scheme.execute.factor.task import run
+        else:
+            from scheme.execute.strategy.task import run
+        code = run(data, checkpoints=checkpoints)
         log.success(f"正式任务完成：{kind}，输出 {output}")
         return code
     except Exception as error:

@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from runtime.utils import logger as log
 
-from scheme._errors import error_text
+from scheme.errors import error_text
 
 __all__ = ["Checkpoints"]
 

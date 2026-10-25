@@ -9,11 +9,11 @@ from backtest import DosVar
 from pydantic import BaseModel
 from runtime.utils import logger as log
 
-from scheme._errors import error_text
 from scheme.base import Algo, Order
 from scheme.config import DolphinSettings
 from scheme.data.dolphindb.database.session import download, open_session, release
 from scheme.data.dolphindb.symbols import engine_symbol, normalize_order
+from scheme.errors import error_text
 
 __all__ = ["Backtest"]
 
@@ -76,8 +76,8 @@ class Backtest(BaseBacktest[C], Generic[C]):
             )
         )
 
-    def _submit_orders(self, orders: Sequence[Order]) -> list[int]:
-        return super()._submit_orders([normalize_order(order) for order in orders])
+    def send_orders(self, orders: Sequence[Order]) -> list[int]:
+        return super().send_orders([normalize_order(order) for order in orders])
 
     def cancel_order(
         self, symbol: str = "", orders: Sequence[int] | None = None, label: str = ""

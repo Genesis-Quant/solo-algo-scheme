@@ -5,8 +5,8 @@ from typing import Any, ClassVar, Generic, Self, TypeVar
 import pandas as pd
 from runtime.utils import logger as log
 
-from scheme._errors import error_text
 from scheme.data.dolphindb.database.session import download
+from scheme.errors import error_text
 from scheme.report.base import Report
 
 P = TypeVar("P")

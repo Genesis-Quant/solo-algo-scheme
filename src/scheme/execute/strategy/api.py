@@ -18,12 +18,12 @@ from backtest import (
 from pydantic import BaseModel
 from runtime.utils import logger as log
 
-from scheme._errors import error_text
 from scheme.base import Algo, ResearchContext, StrategyAnalysisParams
 from scheme.config import DolphinSettings
 from scheme.data import query
 from scheme.data.dolphindb.database.session import download, release, upload
 from scheme.data.dolphindb.symbols import engine_symbol, source_symbol
+from scheme.errors import error_text
 from scheme.execute.checkpoints import Checkpoints
 from scheme.execute.strategy.assembly import validate_context
 from scheme.execute.strategy.engine import Backtest
@@ -189,7 +189,7 @@ class ResearchBacktest(Backtest[BacktestC], Generic[BacktestC]):
                 config[key] = np.int32(value)
         self.loaded_rows = 0
         self.loaded_dates: set[object] = set()
-        self._loaded_daily_batches: set[tuple[np.datetime64, np.datetime64]] = set()
+        self.loaded_daily_batches: set[tuple[np.datetime64, np.datetime64]] = set()
         super().__init__(
             settings,
             engine_name=uuid4().hex,
@@ -203,7 +203,7 @@ class ResearchBacktest(Backtest[BacktestC], Generic[BacktestC]):
                 if parameters.symbols is not None
                 else self.universe.columns[self.universe.any(axis=0)].tolist()
             )
-            self._daily_timeline: np.ndarray | None = None
+            self.daily_timeline: np.ndarray | None = None
         except BaseException:
             try:
                 self.close()
@@ -214,17 +214,17 @@ class ResearchBacktest(Backtest[BacktestC], Generic[BacktestC]):
     def load_timeline(
         self, message: DosVar, start: np.datetime64, end: np.datetime64
     ) -> Sequence[np.datetime64]:
-        if self._daily_timeline is None:
+        if self.daily_timeline is None:
             return super().load_timeline(message, start, end)
-        return self._daily_timeline[(self._daily_timeline >= start) & (self._daily_timeline < end)]
+        return self.daily_timeline[(self.daily_timeline >= start) & (self.daily_timeline < end)]
 
-    def _prepare_daily_messages(self) -> DosVar:
+    def prepare_daily_messages(self) -> DosVar:
         start = np.datetime64(self.parameters.start, "ms")
         end = np.datetime64(self.parameters.end, "ms")
         if not self.symbols:
             self.session.run("soloDailyMessages = table(array(TIMESTAMP, 0) as timestamp); NULL")
-            self._daily_timeline = np.array([], dtype="datetime64[ms]")
-            self._daily_counts = np.array([], dtype=np.int64)
+            self.daily_timeline = np.array([], dtype="datetime64[ms]")
+            self.daily_counts = np.array([], dtype=np.int64)
             return DosVar("soloDailyMessages")
         with query(
             {
@@ -243,20 +243,20 @@ class ResearchBacktest(Backtest[BacktestC], Generic[BacktestC]):
                 f"timestamp({int(end.astype('int64'))})])); "
                 "select count(*) as quotes from soloDailyMessages group by timestamp order by timestamp"
             )
-        self._daily_timeline = np.asarray(timeline["timestamp"], dtype="datetime64[ms]")
-        self._daily_counts = np.asarray(timeline["quotes"], dtype=np.int64)
+        self.daily_timeline = np.asarray(timeline["timestamp"], dtype="datetime64[ms]")
+        self.daily_counts = np.asarray(timeline["quotes"], dtype=np.int64)
         return DosVar("soloDailyMessages")
 
     def load_messages(self, start: np.datetime64, end: np.datetime64) -> DosVar:
         if self.parameters.market_data == "stock_daily":
-            if self._daily_timeline is None:
-                self._prepare_daily_messages()
+            if self.daily_timeline is None:
+                self.prepare_daily_messages()
             batch = (start, end)
-            if batch not in self._loaded_daily_batches:
-                mask = (self._daily_timeline >= start) & (self._daily_timeline < end)
-                self.loaded_rows += int(self._daily_counts[mask].sum())
-                self.loaded_dates.update(pd.DatetimeIndex(self._daily_timeline[mask]).date)
-                self._loaded_daily_batches.add(batch)
+            if batch not in self.loaded_daily_batches:
+                mask = (self.daily_timeline >= start) & (self.daily_timeline < end)
+                self.loaded_rows += int(self.daily_counts[mask].sum())
+                self.loaded_dates.update(pd.DatetimeIndex(self.daily_timeline[mask]).date)
+                self.loaded_daily_batches.add(batch)
             self.session.run(
                 "soloMessages = select * from soloDailyMessages "
                 f"where timestamp >= timestamp({int(start.astype('int64'))}l), "

@@ -8,8 +8,8 @@ import dolphindb as ddb
 from runtime.database.session import redirect_session_output
 from runtime.utils import logger as log
 
-from scheme._errors import error_text
 from scheme.config import DolphinSettings
+from scheme.errors import error_text
 
 
 def upload(session: Any, variables: dict[str, Any], label: str) -> None:
