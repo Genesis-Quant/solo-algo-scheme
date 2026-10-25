@@ -69,7 +69,6 @@ class Universe(BaseModel):
     ) -> QueryResult:
         if start >= end:
             raise ValueError("股票池日期必须满足 start < end，采用 [start, end)")
-        log.info(f"[股票池] 查询 {self.pool} 逐日成员：{start} 至 {end}（不含结束日）")
         return query(
             {
                 "start_date": start.isoformat(),

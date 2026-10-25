@@ -5,8 +5,6 @@ from contextlib import contextmanager
 from typing import Any
 
 import dolphindb as ddb
-import numpy as np
-import pandas as pd
 from runtime.database.session import redirect_session_output
 from runtime.utils import logger as log
 
@@ -15,23 +13,12 @@ from scheme.config import DolphinSettings
 
 
 def upload(session: Any, variables: dict[str, Any], label: str) -> None:
-    descriptions = []
-    for name, value in variables.items():
-        if isinstance(value, pd.DataFrame):
-            description = f"{len(value)} 行、{len(value.columns)} 列"
-        elif isinstance(value, (np.ndarray, pd.Series, list, tuple, dict)):
-            description = f"{len(value)} 项"
-        else:
-            description = type(value).__name__
-        descriptions.append(f"{name}（{description}）")
-    log.info(f"[上传] {label}：{'、'.join(descriptions)}")
     try:
         redirect_session_output(session)
         session.upload(variables)
     except BaseException:
         log.error(f"[上传] {label}失败")
         raise
-    log.info(f"[上传] {label}完成")
 
 
 def release(
@@ -58,27 +45,9 @@ def release(
 def download(session: Any, script: str, label: str) -> Any:
     if not isinstance(script, str) or not script.strip():
         raise ValueError("读取表达式不能为空")
-    log.info(f"[读取] 在 DOS 准备：{label}")
     try:
         redirect_session_output(session)
-        result = session.run(f"""
-            (def(value) {{
-                print("[读取] " + {json.dumps(label, ensure_ascii=False)} + "，类型=" + typestr(value))
-                if (form(value) == 6 || form(value) == 3) {{
-                    print(
-                        "[读取] 即将传回 Python：" + string(rows(value)) + " 行、" +
-                        string(cols(value)) + " 列"
-                    )
-                }} else if (form(value) in [1, 2, 4, 5]) {{
-                    print("[读取] 即将传回 Python：" + string(size(value)) + " 项")
-                }} else {{
-                    print("[读取] 即将传回 Python：标量")
-                }}
-                return value
-            }})({script})
-        """)
-        log.info(f"[读取] {label}完成")
-        return result
+        return session.run(script)
     except BaseException:
         log.error(f"[读取] {label}失败")
         raise
@@ -90,7 +59,6 @@ def open_session(settings: DolphinSettings) -> Any:
     for endpoint in settings.endpoints:
         host, port = endpoint.rsplit(":", 1)
         host = host.removeprefix("[").removesuffix("]")
-        log.info(f"[连接] 正在连接 DolphinDB {endpoint}")
         session = ddb.session()
         connected = False
         try:

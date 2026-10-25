@@ -29,8 +29,8 @@ dependencies = [
 
 [[package]]
 name = "backtest"
-version = "0.2.0"
-source = { git = "https://gitee.com/genesis-quant/backtest?rev=53a98920c248ced43e22777525256b1f6d0e7e3f#53a98920c248ced43e22777525256b1f6d0e7e3f" }
+version = "0.2.1"
+source = { git = "https://gitee.com/genesis-quant/backtest?rev=577d52fe56501671344608b951da742210fcd77c#577d52fe56501671344608b951da742210fcd77c" }
 dependencies = [
     { name = "dolphindb" },
     { name = "numpy" },
@@ -470,7 +470,7 @@ wheels = [
 
 [[package]]
 name = "scheme"
-version = "1.12.1"
+version = "1.12.2"
 source = { editable = "." }
 dependencies = [
     { name = "arena-runtime" },
@@ -494,7 +494,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "arena-runtime", git = "https://gitee.com/genesis-quant/arena-runtime?rev=eeebfe417aa999fa1e386cbd62b74326a5dab66c" },
-    { name = "backtest", git = "https://gitee.com/genesis-quant/backtest?rev=53a98920c248ced43e22777525256b1f6d0e7e3f" },
+    { name = "backtest", git = "https://gitee.com/genesis-quant/backtest?rev=577d52fe56501671344608b951da742210fcd77c" },
     { name = "loguru", specifier = ">=0.7,<0.8" },
     { name = "numpy", specifier = ">=2,<3" },
     { name = "packaging", specifier = ">=24" },

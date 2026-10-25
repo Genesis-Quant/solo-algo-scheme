@@ -22,7 +22,6 @@ use query
 
 def buildQuery(request) {
     sourceTable = loadTable(request.database, request.table)
-    print("[DOS 查询] 读取交易日历")
     calendar = exec distinct timestamp(date(time)) from sourceTable
         where factor = `close, time >= request.start, time < request.end
         order by timestamp(date(time))
@@ -34,7 +33,6 @@ def buildQuery(request) {
             where factor = symbol([column])[0], time >= request.start, time < request.end
         timeline = sort(distinct(timeline join observedDates))
     }
-    print("[DOS 查询] 读取基础字段，输入证券=" + string(size(request.codes)))
     source = build_factor_source(
         sourceTable,
         request.codes,
@@ -45,14 +43,11 @@ def buildQuery(request) {
         request.industry
     )
     source[`selected] = source.time in calendar
-    print("[DOS 查询] 基础表已生成，记录数=" + string(source.rows()))
 
     for (column in request.factors) {
         if (column == request.st) {
-            print("[DOS 查询] 填充字段：" + column)
             source = fill_null_column(source, column, 0.0)
         } else if (column in request.weights) {
-            print("[DOS 查询] 处理指数历史成员：" + column)
             observedDates = exec distinct timestamp(time) from sourceTable
                 where factor = symbol([column])[0], time >= request.start, time < request.end
             source[column] = iif(
@@ -71,18 +66,14 @@ def buildQuery(request) {
                 source[column] = iif(isNull(source[column]), nullFill(prior, 0.0), source[column])
             }
         } else if (column in request.financial || column in request.industry) {
-            print("[DOS 查询] 按证券前向填充：" + column)
             source = forward_fill_column(source, column, source.code, source.time)
         }
     }
     source = finalize_factor_source(source, request.factors)
-    print("[DOS 查询] 计算派生列")
     computed = compute_factors(source, fromStdJson(request.definitions))
-    print("[DOS 查询] 计算完成，执行过滤：" + concat(request.filters, ", "))
     filtered = filter_factors(computed, request.filters)
     data = project_factor_output(filtered, request.columns, request.outputStart, request.end)
     calendar = calendar[calendar >= request.outputStart && calendar < request.end]
-    print("[DOS 查询] 过滤完成，结果保留在服务器，记录数=" + string(data.rows()))
     return dict(`data`calendar, [data, calendar])
 }
 """

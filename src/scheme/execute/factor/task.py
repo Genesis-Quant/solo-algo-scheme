@@ -17,6 +17,7 @@ def run(data: dict[str, Any], *, checkpoints: Checkpoints | None = None) -> int:
     check_output(task)
     versions = installed_versions()
     factor = load_component(task.factor, Factor)
+    task.analysis.bind_columns(factor)
     log.info(f"加载因子：{task.factor.package} {task.factor.version}（{task.factor.entry}）")
     shared = {"universe": task.analysis.universe, "groups": task.analysis.groups}
     params = project_parameters(parameter_type(factor), task.factor.params, overrides=shared)

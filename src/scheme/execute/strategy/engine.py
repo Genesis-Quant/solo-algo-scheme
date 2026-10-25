@@ -31,12 +31,6 @@ class Progress:
     orders: int = 0
     trades: int = 0
     rejected: int = 0
-    day: pd.Timestamp | None = None
-    completed_days: int = 0
-    moments: int = 0
-    total_orders: int = 0
-    total_trades: int = 0
-    total_rejected: int = 0
     finishing: bool = False
 
 
@@ -61,12 +55,6 @@ class Backtest(BaseBacktest[C], Generic[C]):
             algos=algos,
         )
 
-    def upload(self, variables: dict[str, Any], label: str) -> None:
-        upload(self.session, variables, label)
-
-    def download(self, expression: str, label: str) -> Any:
-        return download(self.session, expression, label)
-
     def release(self, variables: Sequence[str]) -> None:
         release(self.session, variables)
 
@@ -79,23 +67,13 @@ class Backtest(BaseBacktest[C], Generic[C]):
         return Progress()
 
     def advance(self, msg: DosVar) -> None:
-        moment = pd.Timestamp(self.time)
         super().advance(msg)
-        progress = self.progress
-        day = moment.normalize()
-        if progress.day is not None and (day != progress.day or progress.finishing):
-            progress.completed_days += 1
-            log.info(
-                f"[回放] 已完成 {progress.completed_days} 个交易日，截至 {progress.day.date()}；"
-                f"行情时点 {progress.moments}，订单 {progress.total_orders}，"
-                f"成交回报 {progress.total_trades}，拒单 {progress.total_rejected}"
-            )
-        if progress.finishing:
+        if self.progress.finishing:
             return
-        progress.day = day
-        progress.moments += 1
-        self.report_month(moment)
-        prices = self.download(f"exec dict(string(symbol), lastPrice) from {msg}", "当前行情价格")
+        self.report_month(pd.Timestamp(self.time))
+        prices = download(
+            self.session, f"exec dict(string(symbol), lastPrice) from {msg}", "当前行情价格"
+        )
         for symbol, price in prices.items():
             if price is not None and isfinite(price) and price > 0:
                 self.latest_prices[symbol] = float(price)
@@ -115,7 +93,9 @@ class Backtest(BaseBacktest[C], Generic[C]):
             progress.month = month
             return
         try:
-            self.upload({"progressDate": np.datetime64(moment.date(), "D")}, "回测月报截止日")
+            upload(
+                self.session, {"progressDate": np.datetime64(moment.date(), "D")}, "回测月报截止日"
+            )
             portfolios = self.get_records(
                 "select top 1 * from Backtest::getDailyTotalPortfolios(engine) "
                 "where tradeDate < progressDate order by tradeDate desc",
@@ -154,7 +134,6 @@ class Backtest(BaseBacktest[C], Generic[C]):
     def submit_order(self, order: Order) -> int:
         identifier = super().submit_order(normalize_order(order))
         self.progress.orders += 1
-        self.progress.total_orders += 1
         return identifier
 
     def cancel_order(
@@ -167,7 +146,6 @@ class Backtest(BaseBacktest[C], Generic[C]):
             for report in payload:
                 if report.status == OrderStatus.REJECTED:
                     self.progress.rejected += 1
-                    self.progress.total_rejected += 1
                     price = f"{report.price:.2f}" if report.price else "市价"
                     log.warning(
                         f"拒单 #{report.orderId}：{report.updateTime}，{report.symbol} "
@@ -175,7 +153,6 @@ class Backtest(BaseBacktest[C], Generic[C]):
                     )
         elif callback == "on_trade":
             self.progress.trades += len(payload)
-            self.progress.total_trades += len(payload)
         try:
             super().on_event(callback, payload)
             while True:

@@ -192,8 +192,6 @@ class ResearchBacktest(Backtest[BacktestC], Generic[BacktestC]):
                 config[key] = np.int32(value)
         self.loaded_rows = 0
         self.loaded_dates: set[object] = set()
-        algorithms = [f"{type(algo).__module__}.{type(algo).__qualname__}" for algo in algos]
-        log.info(f"[回测] 创建引擎，算法={algorithms}")
         super().__init__(
             settings,
             engine_name=uuid4().hex,
@@ -217,9 +215,6 @@ class ResearchBacktest(Backtest[BacktestC], Generic[BacktestC]):
 
     def load_messages(self, start: np.datetime64, end: np.datetime64) -> DosVar:
         symbols = [engine_symbol(symbol) for symbol in self.symbols]
-        log.info(
-            f"[行情] 读取 [{start}, {end})，证券 {len(symbols)} 只，来源={self.parameters.market_data}"
-        )
         if not symbols:
             self.session.run("soloMessages = table(array(TIMESTAMP, 0) as timestamp); NULL")
             return DosVar("soloMessages")
@@ -299,17 +294,12 @@ class ResearchBacktest(Backtest[BacktestC], Generic[BacktestC]):
 
     @cached_property
     def universe(self) -> pd.DataFrame:
-        members = self.parameters.universe.evaluate(
+        return self.parameters.universe.evaluate(
             self.parameters.start,
             self.parameters.end,
             session=self.session,
             settings=self.settings,
         )
-        log.info(
-            f"[股票池] {self.parameters.universe.pool}：{len(members.index)} 个交易日，"
-            f"期间成员 {int(members.any(axis=0).sum())} 只"
-        )
-        return members
 
 
 def records_frame(records: Sequence[BaseModel], model: type[BaseModel]) -> pd.DataFrame:

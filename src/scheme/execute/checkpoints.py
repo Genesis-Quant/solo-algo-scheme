@@ -31,6 +31,11 @@ def readable(size: float) -> str:
     return f"{size:.1f} GB"
 
 
+def file_sha256(path: Path) -> str:
+    with path.open("rb") as file:
+        return hashlib.file_digest(file, "sha256").hexdigest()
+
+
 class Checkpoints:
     """同一 Run 目录内按阶段保存的结果，只在冻结输入和锁定环境完全一致时复用。"""
 
@@ -60,6 +65,11 @@ class Checkpoints:
             ):
                 raise ValueError("与当前冻结输入或锁定环境不一致")
             recorded = manifest["files"]
+            digests = manifest["sha256"]
+            if not isinstance(recorded, dict) or not isinstance(digests, dict):
+                raise ValueError("文件清单或 SHA256 清单无效")
+            if recorded.keys() != digests.keys():
+                raise ValueError("文件清单与 SHA256 清单不一致")
             if missing := [name for name in files if name not in recorded]:
                 raise ValueError(f"缺少文件 {missing}")
             for name, size in recorded.items():
@@ -67,6 +77,8 @@ class Checkpoints:
                     raise ValueError(f"文件名无效：{name!r}")
                 if (directory / name).stat().st_size != size:
                     raise ValueError(f"文件不完整：{name}")
+                if file_sha256(directory / name) != digests[name]:
+                    raise ValueError(f"文件 SHA256 不一致：{name}")
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
             log.warning(f"[检查点] 丢弃{LABELS.get(stage, stage)}：{error_text(error)}")
             shutil.rmtree(directory, ignore_errors=True)
@@ -113,6 +125,7 @@ class Checkpoints:
         try:
             write(staging)
             files = {path.name: path.stat().st_size for path in staging.iterdir() if path.is_file()}
+            digests = {name: file_sha256(staging / name) for name in files}
             (staging / MANIFEST).write_text(
                 json.dumps(
                     {
@@ -121,6 +134,7 @@ class Checkpoints:
                         "fingerprint": self.fingerprint,
                         "created_at": datetime.now(UTC).isoformat(),
                         "files": files,
+                        "sha256": digests,
                     },
                     ensure_ascii=False,
                     indent=2,
