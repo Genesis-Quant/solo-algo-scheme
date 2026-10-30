@@ -16,12 +16,13 @@ class FactorAnalysisResult(Report, Generic[P]):
     report_kind: ClassVar[str] = "factor"
     data_ref: ClassVar[str] = "factorResult"
     filenames: ClassVar[dict[str, str]] = {
-        "processed_data": "factor_processed.parquet",
         "execution_statistics": "factor_execution_statistics.parquet",
         "information_coefficient": "factor_information_coefficients.parquet",
         "group_returns": "factor_group_returns.parquet",
         "group_turnover": "factor_group_turnover.parquet",
     }
+    # 共同有效样本明细只按需读取：报告不使用它，全市场时却占导出体积的绝大部分。
+    tables: ClassVar[tuple[str, ...]] = ("processed_data", *filenames)
 
     def __init__(self, *, session: Any, parameters: P) -> None:
         self.session = session
@@ -29,7 +30,7 @@ class FactorAnalysisResult(Report, Generic[P]):
         self.closed = False
 
     def read(self, name: str, rows: int | None = None) -> pd.DataFrame:
-        if name not in self.filenames:
+        if name not in self.tables:
             raise KeyError(name)
         if self.closed:
             raise RuntimeError("因子分析结果已关闭")

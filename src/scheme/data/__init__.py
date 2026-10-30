@@ -4,12 +4,13 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 from .dolphindb.api import query
+from .dolphindb.schema import FactorQuery
 
 if TYPE_CHECKING:
     from .tushare.api import pro as pro
     from .tushare.api import ts_api as ts_api
 
-__all__ = ["query", "ts_api", "pro"]
+__all__ = ["FactorQuery", "query", "ts_api", "pro"]
 
 
 def __getattr__(name: str) -> Any:

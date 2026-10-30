@@ -56,6 +56,7 @@ def preprocessFactor(inputTable, settings) {
     request["start"] = min(input.time)
     request["outputStart"] = request["start"]
     request["end"] = temporalAdd(max(input.time), 1, "d")
+    request["outputEnd"] = request["end"]
     request["codes"] = distinct(input.code)
     request["factors"] = settings.factors
     request["industry"] = settings.industry
