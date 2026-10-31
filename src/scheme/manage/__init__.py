@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from runtime.utils import logger as log
+from query.utils import logger as log
 
 from scheme.errors import error_text
 

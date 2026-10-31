@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import ClassVar, Literal
 
 import pandas as pd
-from runtime.utils import logger as log
+from query.utils import logger as log
 
 from scheme.report.html import report_html
 

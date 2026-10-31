@@ -1,7 +1,7 @@
 from importlib.metadata import distribution
 from typing import Any
 
-from runtime.utils import logger as log
+from query.utils import logger as log
 
 from scheme.base import Algo, ResearchContext
 from scheme.execute.checkpoints import Checkpoints

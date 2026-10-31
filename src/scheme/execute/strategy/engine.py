@@ -7,7 +7,7 @@ from typing import Any, Generic, TypeVar
 from backtest import Backtest as BaseBacktest
 from backtest import DosVar
 from pydantic import BaseModel
-from runtime.utils import logger as log
+from query.utils import logger as log
 
 from scheme.base import Algo, Order
 from scheme.config import DolphinSettings

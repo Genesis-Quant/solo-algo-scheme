@@ -7,19 +7,217 @@ from contextlib import nullcontext
 import numpy as np
 import pandas as pd
 from backtest import DosVar
-from runtime.apps.query import api as query_api
-from runtime.utils import logger as log
+from query.apps.query import api as query_api
+from query.database.session import initialize_session
+from query.utils import logger as log
 
 from scheme.config import DolphinSettings
-from scheme.data.dolphindb.api import QUERY_SCRIPT
 from scheme.data.dolphindb.database.session import create_session, download, release, upload
 from scheme.data.dolphindb.symbols import engine_symbol
 from scheme.errors import error_text
 
 RESERVED = {"time", "code", "date", "symbol", "stock_pool_member"}
 
-PREPROCESS_SCRIPT = """
-use factor
+PREPROCESS_SCRIPT = r"""
+def factorStringVector(cols) {
+    if (typestr(cols) == "STRING") {
+        return [string(cols)]
+    }
+    return string(cols)
+}
+
+def factorCheckColumns(tb, requiredColumns) {
+    columns = tb.columnNames()
+    for (col in requiredColumns) {
+        if (not(col in columns)) {
+            throw "required column is missing: " + string(col)
+        }
+    }
+}
+
+def factorZScore(values) {
+    valueStd = stdp(values)
+    if (!isValid(valueStd) || valueStd == 0) {
+        return take(double(NULL), size(values))
+    }
+    return (values - avg(values)) \ valueStd
+}
+
+def factorClipMad(values) {
+    valueMedian = median(values)
+    mad = median(abs(values - valueMedian))
+    if (!isValid(mad) || mad == 0) {
+        return values
+    }
+    return values.clip(
+        valueMedian - 3 * mad,
+        valueMedian + 3 * mad
+    )
+}
+
+def factorPreprocess(
+    rawFactorTable,
+    factorCols,
+    nGroups,
+    timeCol="time",
+    codeCol="code",
+    mktmvCol="mktmv",
+    industryCol="industry") {
+    if (nGroups < 2) {
+        throw "nGroups must be at least 2"
+    }
+    factorColNames = factorStringVector(factorCols)
+    factorCheckColumns(
+        rawFactorTable,
+        symbol([timeCol, codeCol, mktmvCol, industryCol])
+    )
+    factorCheckColumns(rawFactorTable, symbol(factorColNames))
+    if (size(rawFactorTable) == 0) {
+        throw "factorPreprocess 输入表为空；请检查 dataset_query.filters 和股票池条件"
+    }
+    for (factorCol in factorColNames) {
+        groupColName = string(factorCol) + "_group"
+        if (groupColName in rawFactorTable.columnNames()) {
+            throw groupColName + " column already exists"
+        }
+    }
+
+    workingTable = rawFactorTable.copy()
+    addColumn(workingTable, `factor_preprocess_row_id, LONG)
+    update workingTable
+        set factor_preprocess_row_id =
+            long(0 .. (size(workingTable) - 1))
+    dateTable =
+        <select distinct(_$timeCol) as date_col
+         from workingTable>.eval()
+    dates = dateTable.sortBy!(`date_col)[`date_col]
+
+    for (factorCol in factorColNames) {
+        factorProcessedCol =
+            symbol([string(factorCol) + "_processed"])[0]
+        addColumn(workingTable, factorProcessedCol, DOUBLE)
+        groupCol = symbol([string(factorCol) + "_group"])[0]
+        addColumn(workingTable, groupCol, INT)
+    }
+
+    mktmvColSym = symbol([mktmvCol])[0]
+    industryColSym = symbol([industryCol])[0]
+    for (currentDate in dates) {
+        crossSection =
+            <select *
+             from workingTable
+             where _$timeCol = currentDate>.eval()
+        if (size(crossSection) == 0) {
+            continue
+        }
+        // Keep the regression and tie ordering independent of physical rows.
+        crossSection.sortBy!(symbol([codeCol]))
+
+        for (factorCol in factorColNames) {
+            factorColSym = symbol([string(factorCol)])[0]
+            rawFactor = double(crossSection[factorColSym])
+            rawMarketValue = double(crossSection[mktmvColSym])
+            rawIndustry = string(crossSection[industryColSym])
+            validMask = isValid(rawFactor) &&
+                isValid(rawMarketValue) &&
+                isValid(rawIndustry)
+            if (sum(validMask) == 0) {
+                continue
+            }
+            rowIds = crossSection[`factor_preprocess_row_id][validMask]
+            marketValue = rawMarketValue[validMask]
+            marketValue = iif(marketValue < 1, 1.0, marketValue)
+            mv = factorZScore(log(marketValue))
+            industryValues = rawIndustry[validMask]
+            y = factorZScore(
+                factorClipMad(rawFactor[validMask])
+            )
+            regressionMask = isValid(y) && isValid(mv)
+            if (sum(regressionMask) == 0) {
+                continue
+            }
+            rowIds = rowIds[regressionMask]
+            y = y[regressionMask]
+            mv = mv[regressionMask]
+            industryValues = industryValues[regressionMask]
+            industries = sort(distinct(industryValues))
+            x = matrix(mv)
+            if (size(industries) > 1) {
+                for (i in 1 .. (size(industries) - 1)) {
+                    x = x join
+                        matrix(double(industryValues == industries[i]))
+                }
+            }
+            design = matrix(take(1.0, size(y))) join x
+            singularValues = svd(design, false, false)
+            rankTolerance = max(singularValues) *
+                max([rows(design), cols(design)]) * 2.220446049250313e-16
+            effectiveRank = sum(singularValues > rankTolerance)
+            if (size(y) <= effectiveRank) {
+                continue
+            }
+            beta = ols(y, x, true, 0, "svd")
+            fitted = beta[0] + beta[1] * mv
+            if (size(industries) > 1) {
+                for (i in 1 .. (size(industries) - 1)) {
+                    fitted += beta[i + 1] * flatten(x[, i])
+                }
+            }
+
+            factorProcessedCol =
+                symbol([string(factorCol) + "_processed"])[0]
+            processedValues = workingTable[factorProcessedCol]
+            rawResidual = y - fitted
+            residualTolerance = max(abs(y)) *
+                max([rows(design), cols(design)]) * 2.220446049250313e-16
+            if (!isValid(stdp(rawResidual)) || stdp(rawResidual) <= residualTolerance) {
+                continue
+            }
+            residual = factorZScore(rawResidual)
+            processedValues[rowIds] = residual
+            workingTable[factorProcessedCol] = processedValues
+
+            validRows = table(
+                rowIds as factor_preprocess_row_id,
+                string(crossSection[codeCol][validMask][regressionMask]) as factor_code,
+                residual as factor_value
+            )
+            validRows =
+                select factor_preprocess_row_id, factor_code, factor_value
+                from validRows
+                where isValid(factor_value)
+                order by factor_value, factor_code
+            if (size(validRows) > 0) {
+                rankIndex = 0 .. (size(validRows) - 1)
+                groups = int(
+                    floor(
+                        rankIndex * nGroups \
+                        double(size(validRows))
+                    )
+                )
+                groupCol =
+                    symbol([string(factorCol) + "_group"])[0]
+                groupValues = workingTable[groupCol]
+                groupValues[validRows[`factor_preprocess_row_id]] = iif(
+                    groups >= nGroups,
+                    nGroups - 1,
+                    groups
+                )
+                workingTable[groupCol] = groupValues
+            }
+        }
+    }
+
+    for (factorCol in factorColNames) {
+        factorColSym = symbol([string(factorCol)])[0]
+        factorProcessedCol =
+            symbol([string(factorCol) + "_processed"])[0]
+        workingTable.dropColumns!([factorColSym])
+        workingTable.rename!(factorProcessedCol, factorColSym)
+    }
+    workingTable.dropColumns!([`factor_preprocess_row_id])
+    return workingTable
+}
 
 def preprocessFactor(inputTable, settings) {
     required = ["time", "code"] join settings.columns
@@ -70,8 +268,8 @@ def preprocessFactor(inputTable, settings) {
     replaceColumn!(reference, `code, string(reference.code))
     print("[DOS 预处理] 按日期和证券连接因子、所属行业及流通市值")
     working = lj(input, reference, `time`code)
-    print("[DOS 中性化] 开始 factor::factorPreprocess，因子=" + concat(settings.columns, ", "))
-    processed = factor::factorPreprocess(
+    print("[DOS 中性化] 开始 factorPreprocess，因子=" + concat(settings.columns, ", "))
+    processed = factorPreprocess(
         working,
         settings.columns,
         settings.groups,
@@ -214,7 +412,7 @@ def preprocess(
             )
             if not is_variable:
                 upload(session, {input_ref: frame}, "本地因子表")
-            session.run(QUERY_SCRIPT)
+            initialize_session(session)
             session.run(PREPROCESS_SCRIPT)
             session.run(
                 f"preprocessResult = preprocessFactor({input_ref}, preprocessSettings); NULL"
@@ -243,5 +441,5 @@ def preprocess(
                         "preprocessResult",
                         *([] if is_variable else ["preprocessInput"]),
                     ],
-                    ["preprocessFactor", "buildQuery"],
+                    ["preprocessFactor"],
                 )

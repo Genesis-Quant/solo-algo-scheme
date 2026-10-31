@@ -1,6 +1,6 @@
 from typing import Any
 
-from runtime.utils import logger as log
+from query.utils import logger as log
 
 from scheme.base import Factor
 from scheme.execute.checkpoints import Checkpoints

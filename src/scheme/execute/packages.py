@@ -7,7 +7,7 @@ import re
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import Version
-from runtime.utils import logger as log
+from query.utils import logger as log
 
 from .schema import Package
 
@@ -17,7 +17,7 @@ def installed_versions() -> dict[str, str]:
     log.info(
         f"运行环境：Scheme {versions.get('scheme', '未安装')}，"
         f"Backtest {versions.get('backtest', '未安装')}，"
-        f"Arena Runtime {versions.get('arena-runtime', '未安装')}，"
+        f"Query {versions.get('query', '未安装')}，"
         f"DolphinDB SDK {versions.get('dolphindb', '未安装')}"
     )
     return versions

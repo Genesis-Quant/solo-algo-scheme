@@ -22,7 +22,7 @@ from backtest import (
     TWAPOrder,
     VWAPOrder,
 )
-from runtime.utils import logger
+from query.utils import logger
 
 from .base import (
     Algo,

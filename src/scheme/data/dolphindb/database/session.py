@@ -4,9 +4,9 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from typing import Any
 
-import dolphindb as ddb
-from runtime.database.session import redirect_session_output
-from runtime.utils import logger as log
+from query.database.session import create_session as open_query_session
+from query.database.session import redirect_session_output
+from query.utils import logger as log
 
 from scheme.config import DolphinSettings
 from scheme.errors import error_text
@@ -54,39 +54,8 @@ def download(session: Any, script: str, label: str) -> Any:
 
 
 def open_session(settings: DolphinSettings) -> Any:
-    """仅在建立连接时依次尝试端点，不重连或重放任务，不设置查询超时。"""
-    failures = []
-    for endpoint in settings.endpoints:
-        host, port = endpoint.rsplit(":", 1)
-        host = host.removeprefix("[").removesuffix("]")
-        session = ddb.session()
-        connected = False
-        try:
-            redirect_session_output(session)
-            connected = session.connect(
-                host,
-                int(port),
-                settings.username,
-                settings.password.get_secret_value(),
-                highAvailability=False,
-                reconnect=False,
-            )
-            if not connected:
-                raise ConnectionError("服务端未接受连接")
-        except Exception as error:
-            message = error_text(error, settings.password.get_secret_value())
-            failures.append(f"{endpoint}：{message}")
-            log.warning(f"[连接] DolphinDB {endpoint} 连接失败：{message}")
-        finally:
-            if not connected:
-                try:
-                    session.close()
-                except Exception as error:
-                    message = error_text(error, settings.password.get_secret_value())
-                    log.warning(f"[连接] DolphinDB {endpoint} 失败会话关闭异常：{message}")
-        if connected:
-            return session
-    raise ConnectionError(f"所有 DolphinDB 端点均连接失败：{'；'.join(failures)}") from None
+    """连接后预加载当前 Query 包编译的 DOS，不重连或重放任务。"""
+    return open_query_session(settings)
 
 
 @contextmanager

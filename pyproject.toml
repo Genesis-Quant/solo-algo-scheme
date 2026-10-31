@@ -13,7 +13,7 @@ dependencies = [
     "loguru>=0.7,<0.8",
     "tushare>=1.4.29,<2",
     "backtest @ git+https://gitee.com/genesis-quant/backtest@f63868467fb2cd974826e311749297b1cba3041d",
-    "arena-runtime @ git+https://gitee.com/genesis-quant/arena-runtime@eeebfe417aa999fa1e386cbd62b74326a5dab66c",
+    "query @ git+https://gitee.com/genesis-quant/query@e626450026dab87e31b1d74e31c2b1aecafea9ed",
 ]
 
 [project.scripts]

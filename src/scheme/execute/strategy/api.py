@@ -16,7 +16,7 @@ from backtest import (
     TradeDetail,
 )
 from pydantic import BaseModel
-from runtime.utils import logger as log
+from query.utils import logger as log
 
 from scheme.base import Algo, ResearchContext, StrategyAnalysisParams
 from scheme.config import DolphinSettings

@@ -8,7 +8,7 @@ from typing import ClassVar, Generic, TypeVar
 
 import pandas as pd
 from backtest import DosVar
-from runtime.utils import logger as log
+from query.utils import logger as log
 
 from scheme.config import DolphinSettings
 from scheme.errors import error_text

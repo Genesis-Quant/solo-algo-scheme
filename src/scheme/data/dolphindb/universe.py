@@ -6,7 +6,7 @@ from typing import Any, ClassVar
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
-from runtime.utils import logger as log
+from query.utils import logger as log
 
 from scheme.config import DolphinSettings
 

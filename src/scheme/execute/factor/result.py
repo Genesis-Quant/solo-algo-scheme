@@ -3,7 +3,7 @@
 from typing import Any, ClassVar, Generic, Self, TypeVar
 
 import pandas as pd
-from runtime.utils import logger as log
+from query.utils import logger as log
 
 from scheme.data.dolphindb.database.session import download
 from scheme.errors import error_text
