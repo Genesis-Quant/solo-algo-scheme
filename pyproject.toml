@@ -1,6 +1,6 @@
 [project]
 name = "scheme"
-version = "1.12.12"
+version = "1.12.13"
 description = "Solo research interfaces, strategy assembly and execution."
 requires-python = ">=3.12,<3.13"
 dependencies = [
@@ -13,7 +13,7 @@ dependencies = [
     "loguru>=0.7,<0.8",
     "tushare>=1.4.29,<2",
     "backtest @ git+https://gitee.com/genesis-quant/backtest@f63868467fb2cd974826e311749297b1cba3041d",
-    "query @ git+https://gitee.com/genesis-quant/query@4c3ec80d6e0fc0178b226324c97bad53163c5984",
+    "query @ git+https://gitee.com/genesis-quant/query@3e3af3bc5c26ead1e138fb7c3ba7375e352cd78b",
 ]
 
 [project.scripts]
