@@ -136,4 +136,4 @@ def test_no_arena_runtime_is_needed():
 
     with pytest.raises(metadata.PackageNotFoundError):
         metadata.version("arena-runtime")
-    assert metadata.version("query") == "0.1.0"
+    assert metadata.version("query") == "0.1.1"
