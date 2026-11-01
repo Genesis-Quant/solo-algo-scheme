@@ -1,3 +1,4 @@
+from datetime import timedelta
 from typing import TypeVar
 
 import numpy as np
@@ -751,10 +752,35 @@ def analyze_factors(
     }
     session = open_session(settings)
     try:
+        # 按实际交易日期读取足够的未来行情；观测数不能直接当成自然日时长。
+        upload(
+            session,
+            {
+                "analysisCalendarDatabase": settings.database,
+                "analysisCalendarTable": settings.table,
+                "analysisCalendarEnd": np.datetime64(parameters.end, "ms") + np.timedelta64(1, "D"),
+                "analysisCalendarCode": source_symbol(parameters.calendar_symbol),
+            },
+            "收益标签交易日历",
+        )
+        try:
+            future_dates = session.run(f"""
+                exec top {parameters.period + parameters.max_lag} time
+                from loadTable(analysisCalendarDatabase, analysisCalendarTable)
+                where factor = `close, code = symbol([analysisCalendarCode])[0],
+                    time >= analysisCalendarEnd
+                order by time
+            """)
+        finally:
+            release(session, ["analysisCalendarDatabase", "analysisCalendarTable", "analysisCalendarEnd", "analysisCalendarCode"])
+        lookforward = timedelta(0)
+        if len(future_dates):
+            lookforward = pd.Timestamp(future_dates[-1]).normalize().date() - parameters.end
         with query(
             {
                 "start_date": parameters.start.isoformat(),
                 "end_date": parameters.end.isoformat(),
+                "lookforward": lookforward,
                 "codes": codes,
                 "factors": ["circ_mv"] if parameters.weight == "market_value" else [],
                 "derivatives": derivatives,
