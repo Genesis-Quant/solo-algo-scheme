@@ -32,7 +32,7 @@ from pydantic import (
     create_model,
 )
 
-from scheme.data.dolphindb.universe import StockPool, Universe
+from scheme.data.universe import StockPool, Universe
 
 __all__ = ["ReportForm"]
 

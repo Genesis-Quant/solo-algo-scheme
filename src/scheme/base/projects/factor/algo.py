@@ -8,9 +8,9 @@ from typing import ClassVar, Generic, TypeVar
 
 import pandas as pd
 from backtest import DosVar
-from query.utils import logger as log
 
-from scheme.config import DolphinSettings
+from scheme import logger
+from scheme.data.dolphindb.settings import DolphinSettings
 from scheme.errors import error_text
 
 from .params import FactorParams
@@ -119,19 +119,19 @@ class Factor(ABC, Generic[P]):
                 name = f"{type(self).__module__}.{type(self).__qualname__}"
                 start = kwargs.get("start", args[0] if args else None)
                 end = kwargs.get("end", args[1] if len(args) > 1 else None)
-                log.info(f"[因子] 开始：{name}，区间 {start} 至 {end}，因子列={self.columns}")
+                logger.info(f"[因子] 开始：{name}，区间 {start} 至 {end}，因子列={self.columns}")
                 try:
                     panel = compute(self, *args, **kwargs)
                     panel = validate_result(panel, self.columns, f"{name}.compute")
                     days = panel.index.get_level_values("date").nunique()
                     securities = panel.index.get_level_values("symbol").nunique()
-                    log.info(
+                    logger.info(
                         f"[因子] 完成：{name}，{len(panel)} 行、{days} 个日期、{securities} 只证券；"
                         f"各因子空值数={panel.isna().sum().to_dict()}"
                     )
                     return panel
                 except Exception as error:
-                    log.error(f"因子计算失败：{name}，范围 {start} 至 {end}；{error_text(error)}")
+                    logger.error(f"因子计算失败：{name}，范围 {start} 至 {end}；{error_text(error)}")
                     raise
 
             checked_compute.scheme_checked_compute = checked_compute
@@ -153,14 +153,14 @@ class Factor(ABC, Generic[P]):
         self,
         data: pd.DataFrame | DosVar,
         *,
-        session=None,
+        session,
         market_value_column: str = "circ_mv",
         industry_column: str = "industry_l0",
-        settings: DolphinSettings | None = None,
+        settings: type[DolphinSettings] = DolphinSettings,
     ) -> pd.DataFrame:
         """在 compute 返回前调用 factor 模块去极值、标准化和市值/动态行业中性化。
 
-        接受 time/code 普通列或 (date, symbol) 面板；DosVar 必须显式传 session。
+        接受 time/code 普通列或 (date, symbol) 面板；调用方必须传入已初始化Query的session。
         因子列来自 self.columns；所属行业和流通市值按输入日期和证券在同一服务器查询。无效或退化记录
         保留为 NULL，不生成分组；返回唯一、排序的 (date, symbol) 数值因子面板。
         """
@@ -182,7 +182,7 @@ class Factor(ABC, Generic[P]):
         不一致时抛出 ValueError；通过仅说明抽样一致，并非不存在未来依赖的证明。
         """
         factor_name = f"{type(self).__module__}.{type(self).__qualname__}"
-        log.info(f"[校验] 开始：{factor_name}，区间 {start} 至 {end}，因子列={self.columns}")
+        logger.info(f"[校验] 开始：{factor_name}，区间 {start} 至 {end}，因子列={self.columns}")
         sample_index, sample_total, sample_day = 0, 0, None
         try:
             if isinstance(n_sample, bool) or not isinstance(n_sample, int) or n_sample <= 0:
@@ -203,26 +203,26 @@ class Factor(ABC, Generic[P]):
                 )
             days = dates.unique().date.tolist()
             securities = panel.index.get_level_values("symbol").nunique()
-            log.info(
+            logger.info(
                 f"[校验] 全区间结果：{factor_name}，{len(panel)} 行、{len(panel.columns)} 列、"
                 f"{len(days)} 个日期、{securities} 只证券"
             )
             sampled = sample(days, min(n_sample, len(days)))
             sample_total = len(sampled)
-            log.info(f"因子抽样校验日期：{', '.join((day.isoformat() for day in sampled))}")
+            logger.info(f"因子抽样校验日期：{', '.join((day.isoformat() for day in sampled))}")
             # 仅快照抽中的日期，且必须在任何单日 compute 可能改写复用面板之前完成。
             snapshots = [(day, panel.loc[dates == pd.Timestamp(day)].copy()) for day in sampled]
             for sample_index, (day, expected) in enumerate(snapshots, 1):
                 sample_day = day
                 context = f"样本日期 {day}"
-                log.debug(
+                logger.debug(
                     f"因子抽样校验样本 {sample_index}/{sample_total} 开始：{factor_name}，日期 {day}"
                 )
                 try:
                     actual = self.compute(day, day)
                 except ValueError as error:
                     raise ValueError(f"{context}：{error}") from error
-                log.debug(
+                logger.debug(
                     f"因子抽样校验样本 {sample_index}/{sample_total} 计算完成：{factor_name}，日期 {day}"
                 )
                 actual_dates = panel_dates(actual, context)
@@ -277,12 +277,12 @@ class Factor(ABC, Generic[P]):
                         raise ValueError(
                             f"{context}：列 {column!r} 因子值不一致\n{error}"
                         ) from error
-                log.info(
+                logger.info(
                     f"因子抽样校验样本 {sample_index}/{sample_total} 比较通过：{factor_name}，日期 {day}"
                 )
-            log.info(f"因子抽样校验全部通过：{factor_name}，{sample_total} 个样本")
+            logger.info(f"因子抽样校验全部通过：{factor_name}，{sample_total} 个样本")
         except Exception as error:
-            log.error(
+            logger.error(
                 f"因子校验失败：{factor_name}，样本 {sample_index}/{sample_total}，日期={sample_day}；{error_text(error)}"
             )
             raise

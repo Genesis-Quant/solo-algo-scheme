@@ -9,13 +9,12 @@ from typing import Any, Generic, TypeVar
 import numpy as np
 import pandas as pd
 from pydantic import Field
+from query import execute_query
 from scipy.optimize import minimize
 
 from scheme.base.internal.context import ResearchContext
 from scheme.base.internal.types import Signal, Target
-from scheme.base.projects.optimize import OptimizeAlgo
-from scheme.base.projects.optimize import OptimizeParams as BaseOptimizeParams
-from scheme.data import query
+from scheme.base.projects.optimize import OptimizeAlgo, params
 from scheme.data.dolphindb.symbols import engine_symbol, normalize_assets, source_symbol
 
 __all__ = ["risk_parity", "OptimizeParams", "RiskParity"]
@@ -55,7 +54,7 @@ def risk_parity(returns: pd.DataFrame) -> tuple[np.ndarray, str | None]:
     return result.x, None
 
 
-class OptimizeParams(BaseOptimizeParams):
+class OptimizeParams(params.OptimizeParams):
     lookback_days: int = Field(default=180, ge=30)
     gross_exposure: float = Field(default=0.98, ge=0, le=1)
 
@@ -75,7 +74,7 @@ class RiskParity(OptimizeAlgo[OptimizeParams, C], Generic[C]):
         if not symbols:
             return {}
         today = pd.Timestamp(self.backtest.time).date()
-        with query(
+        with execute_query(
             {
                 "start_date": (today - timedelta(days=self.params.lookback_days)).isoformat(),
                 "end_date": (today - timedelta(days=1)).isoformat(),

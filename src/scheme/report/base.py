@@ -2,17 +2,32 @@
 
 import sys
 from pathlib import Path
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, Self
 
 import pandas as pd
-from query.utils import logger as log
 
+from scheme import logger
 from scheme.report.html import report_html
 
 
 class Report:
     filenames: ClassVar[dict[str, str]] = {}
     report_kind: ClassVar[str] = ""
+
+    def close(self) -> None:
+        """本地报告不持有连接；服务端结果由子类关闭会话。"""
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exception_type, exception, traceback) -> bool:
+        try:
+            self.close()
+        except Exception as error:
+            if exception_type is None:
+                raise
+            logger.warning(f"异常退出时关闭报告失败：{type(error).__name__}")
+        return False
 
     def show(
         self,
@@ -62,11 +77,11 @@ class Report:
             destination = output / filename
             temporary = destination.with_suffix(".parquet.tmp")
             frame = getattr(self, name)
-            log.debug(f"写入 Parquet：{destination}，{len(frame)} 行、{len(frame.columns)} 列")
+            logger.debug(f"写入 Parquet：{destination}，{len(frame)} 行、{len(frame.columns)} 列")
             frame.to_parquet(temporary, index=False)
             temporary.replace(destination)
             paths.append(destination)
-            log.info(
+            logger.info(
                 f"保存报告 {index}/{len(self.filenames)}：{filename}，"
                 f"{len(frame)} 行、{len(frame.columns)} 列，{destination.stat().st_size} 字节"
             )

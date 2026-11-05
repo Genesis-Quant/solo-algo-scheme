@@ -1,90 +1,15 @@
-from backtest import (
-    AlgoPriceType,
-    DailyPortfolio,
-    DailyPosition,
-    DailyTradingStatistics,
-    Direction,
-    DosRecord,
-    DosVar,
-    EngineContext,
-    LimitOrder,
-    MarketOrder,
-    OrderKind,
-    OrderReport,
-    OrderStatus,
-    Position,
-    PriceType,
-    StopLimitOrder,
-    StopMarketOrder,
-    TimeInForce,
-    TradeDetail,
-    TradeReport,
-    TWAPOrder,
-    VWAPOrder,
-)
-from query.utils import logger
+"""通用工具；数据、算法定义、执行及报告分别由对应子包导出。"""
 
-from .base import (
-    Algo,
-    Asset,
-    ControlAlgo,
-    ExecutionAlgo,
-    Factor,
-    FactorParams,
-    ModelAlgo,
-    OptimizeAlgo,
-    Order,
-    ResearchContext,
-    Signal,
-    StrategyAnalysisParams,
-    StrategyParams,
-    Target,
-)
-from .data.dolphindb.universe import StockPool, Universe
-from .execute.strategy.assembly import AlgoComponents, Strategy
-from .execute.strategy.components import algo_options
+import os
+import sys
 
-__all__ = [
-    "algo_options",
-    "Algo",
-    "AlgoComponents",
-    "AlgoPriceType",
-    "Asset",
-    "ControlAlgo",
-    "DailyPortfolio",
-    "DailyPosition",
-    "DailyTradingStatistics",
-    "Direction",
-    "DosRecord",
-    "DosVar",
-    "EngineContext",
-    "ExecutionAlgo",
-    "Factor",
-    "FactorParams",
-    "LimitOrder",
-    "logger",
-    "MarketOrder",
-    "ModelAlgo",
-    "OptimizeAlgo",
-    "Order",
-    "OrderKind",
-    "OrderReport",
-    "OrderStatus",
-    "Position",
-    "PriceType",
-    "ResearchContext",
-    "Signal",
-    "StockPool",
-    "StopLimitOrder",
-    "StopMarketOrder",
-    "Strategy",
-    "StrategyAnalysisParams",
-    "StrategyParams",
-    "TWAPOrder",
-    "Target",
-    "TimeInForce",
-    "TradeDetail",
-    "TradeReport",
-    "VWAPOrder",
-    "Universe",
-]
+if "loguru" not in sys.modules and "LOGURU_AUTOINIT" not in os.environ:
+    os.environ["LOGURU_AUTOINIT"] = "False"
+    from loguru import logger
+
+    del os.environ["LOGURU_AUTOINIT"]
+    logger.add(sys.stdout, diagnose=False)
+else:
+    from loguru import logger
+
+__all__ = ["logger"]

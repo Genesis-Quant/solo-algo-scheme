@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from packaging.version import Version
 from pydantic import BaseModel
-from query.utils import logger as log
 
+from scheme import logger
 from scheme.base import (
     Algo,
     ControlAlgo,
@@ -20,13 +20,13 @@ from scheme.base import (
 from scheme.base.projects.control.default import NoControl
 from scheme.base.projects.execution.default import DirectExecution
 from scheme.base.projects.optimize.default import RiskParity
+from scheme.data.dolphindb.settings import DolphinSettings
 from scheme.execute.packages import validate_scheme_requirement
 
 from .api import run_backtest
 from .assembly import context_type, parameter_type, project_parameters
 
 if TYPE_CHECKING:
-    from scheme.config import DolphinSettings
 
     from .result import BacktestResult
 
@@ -97,7 +97,7 @@ def run_research(
     current: type[Algo[P, C]],
     *,
     ctx: C | None = None,
-    settings: "DolphinSettings | None" = None,
+    settings: type[DolphinSettings] = DolphinSettings,
 ) -> "BacktestResult[A]":
     components = research_components(params, kind, current)
     defaults = {
@@ -110,7 +110,7 @@ def run_research(
     description = "；".join(
         f"{name} {cls.__module__}:{cls.__name__}" for name, cls in components.items()
     )
-    log.debug(f"{kind} 研究组件：{description}")
+    logger.debug(f"{kind} 研究组件：{description}")
     context = ctx if ctx is not None else context_type(components["model"])()
     backtest = StrategyAnalysisParams.model_validate(dict(params))
     algos = tuple(

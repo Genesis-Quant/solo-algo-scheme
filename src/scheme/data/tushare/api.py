@@ -1,14 +1,10 @@
-"""Tushare SDK 和使用 TUSHARE_TOKEN 初始化的 Pro 客户端。"""
+"""Tushare SDK和使用TUSHARE_TOKEN的Pro客户端；导入时不请求数据。"""
 
 import os
 
-import tushare as ts_api
+import tushare
 from tushare.pro.client import DataApi
 
-token = os.getenv("TUSHARE_TOKEN")
-if not token:
-    raise RuntimeError("请先配置 TUSHARE_TOKEN，再导入 Tushare 数据源")
+pro = DataApi(token=os.getenv("TUSHARE_TOKEN") or "")
 
-pro: DataApi = ts_api.pro_api(token)
-
-__all__ = ["pro", "ts_api"]
+__all__ = ["pro", "tushare"]

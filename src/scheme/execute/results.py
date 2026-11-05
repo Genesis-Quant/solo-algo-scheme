@@ -2,8 +2,7 @@ import json
 from collections.abc import Mapping
 from pathlib import Path
 
-from query.utils import logger as log
-
+from scheme import logger
 from scheme.report.base import Report
 
 from .checkpoints import Checkpoints
@@ -43,7 +42,7 @@ def resume_run(
     directory = checkpoints.complete("report", report.filenames.values())
     if directory is None:
         return False
-    log.info("[检查点] 报告数据已完整保存，跳过全部计算阶段，直接发布报告")
+    logger.info("[检查点] 报告数据已完整保存，跳过全部计算阶段，直接发布报告")
     paths = checkpoints.publish(directory, report.filenames.values(), task.output)
     publish_manifest(task, report.report_kind, report.filenames, versions, paths)
     checkpoints.clear()
@@ -75,7 +74,7 @@ def publish_manifest(
         encoding="utf-8",
     )
     temporary.replace(task.output / "run.json")
-    log.success(
+    logger.success(
         f"报告已保存：{len(paths)} 个文件，"
         f"共 {sum(path.stat().st_size for path in paths)} 字节，目录 {task.output}"
     )

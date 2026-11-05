@@ -9,15 +9,14 @@ import pandas as pd
 
 from scheme.base.internal.context import ResearchContext
 from scheme.base.internal.types import Order
-from scheme.base.projects.execution import ExecutionAlgo
-from scheme.base.projects.execution import ExecutionParams as BaseExecutionParams
+from scheme.base.projects.execution import ExecutionAlgo, params
 
 __all__ = ["DefaultParams", "DirectExecution"]
 
 C = TypeVar("C", bound=ResearchContext[Any], infer_variance=True)
 
 
-class DefaultParams(BaseExecutionParams):
+class DefaultParams(params.ExecutionParams):
     pass
 
 

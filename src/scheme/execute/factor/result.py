@@ -3,8 +3,8 @@
 from typing import Any, ClassVar, Generic, Self, TypeVar
 
 import pandas as pd
-from query.utils import logger as log
 
+from scheme import logger
 from scheme.data.dolphindb.database.session import download
 from scheme.errors import error_text
 from scheme.report.base import Report
@@ -82,7 +82,7 @@ class FactorAnalysisResult(Report, Generic[P]):
         except Exception as error:
             if exception_type is None:
                 raise
-            log.warning(f"[分析] 异常退出时关闭结果失败：{error_text(error)}")
+            logger.warning(f"[分析] 异常退出时关闭结果失败：{error_text(error)}")
         return False
 
     def __repr__(self) -> str:

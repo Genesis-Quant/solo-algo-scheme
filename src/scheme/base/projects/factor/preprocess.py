@@ -2,17 +2,23 @@
 
 import re
 from collections.abc import Sequence
-from contextlib import nullcontext
 
 import numpy as np
 import pandas as pd
 from backtest import DosVar
-from query.apps.query import api as query_api
-from query.database.session import initialize_session
-from query.utils import logger as log
+from query.utils import IS_ST_FACTOR, WEIGHT_PREFIX
+from query.workers import available_factors
+from query.workers.core.industry import INDUSTRY_FACTORS
+from query.workers.core.stock_financial import FINANCIAL_FACTORS
 
-from scheme.config import DolphinSettings
-from scheme.data.dolphindb.database.session import create_session, download, release, upload
+from scheme import logger
+from scheme.data.dolphindb.database.session import (
+    download,
+    redirect_session_output,
+    release,
+    upload,
+)
+from scheme.data.dolphindb.settings import DolphinSettings
 from scheme.data.dolphindb.symbols import engine_symbol
 from scheme.errors import error_text
 
@@ -298,11 +304,13 @@ def preprocess(
     *,
     columns: Sequence[str],
     groups: int,
-    session=None,
+    session,
     market_value_column: str = "circ_mv",
     industry_column: str = "industry_l0",
-    settings: DolphinSettings | None = None,
+    settings: type[DolphinSettings] = DolphinSettings,
 ) -> pd.DataFrame:
+    if session is None:
+        raise TypeError("session 必须是已有的 DolphinDB 会话")
     if (
         isinstance(groups, bool)
         or not isinstance(groups, int)
@@ -324,14 +332,12 @@ def preprocess(
     ):
         raise ValueError("因子、行业、市值和日期证券列不能重名")
     factors = [market_value_column, industry_column]
-    if unknown := set(factors) - set(query_api.available_factors()):
+    if unknown := set(factors) - set(available_factors()):
         raise ValueError(f"行业或市值字段未声明：{sorted(unknown)}")
     is_variable = isinstance(data, str)
     if is_variable:
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", data) is None:
             raise ValueError("DosVar 必须是单个 DolphinDB 变量名")
-        if session is None:
-            raise ValueError("DosVar 必须提供所属 session")
         if data in {"preprocessInput", "preprocessSettings", "preprocessResult"}:
             raise ValueError("输入变量名与中性化内部变量重名")
     elif not isinstance(data, pd.DataFrame):
@@ -380,66 +386,61 @@ def preprocess(
             frame[column] = pd.to_numeric(frame[column], errors="raise").astype(float)
         if not frame[selected].notna().any().any():
             raise ValueError("因子值全部为空")
-    settings = settings if settings is not None else DolphinSettings.from_env()
-    owns_session = session is None
-    with create_session(settings) if owns_session else nullcontext(session) as session:
-        try:
-            query_api.redirect_session_output(session)
-            upload(
-                session,
-                {
-                    "preprocessSettings": {
-                        "database": settings.database,
-                        "table": settings.table,
-                        "columns": np.asarray(selected, dtype=str),
-                        "groups": np.int32(groups),
-                        "market": market_value_column,
-                        "industryColumn": industry_column,
-                        "factors": np.asarray(factors, dtype=str),
-                        "industry": np.asarray(
-                            [f for f in factors if f in query_api.INDUSTRY_FACTORS], dtype=str
-                        ),
-                        "financial": np.asarray(
-                            [f for f in factors if f in query_api.FINANCIAL_FACTORS], dtype=str
-                        ),
-                        "weights": np.asarray(
-                            [f for f in factors if f.startswith(query_api.WEIGHT_PREFIX)], dtype=str
-                        ),
-                        "st": query_api.IS_ST_FACTOR,
-                    }
-                },
-                "中性化列设置",
-            )
-            if not is_variable:
-                upload(session, {input_ref: frame}, "本地因子表")
-            initialize_session(session)
-            session.run(PREPROCESS_SCRIPT)
-            session.run(
-                f"preprocessResult = preprocessFactor({input_ref}, preprocessSettings); NULL"
-            )
-            processed = download(session, "preprocessResult", "最终中性化因子")
-            panel = processed[selected].astype(float)
-            panel.index = pd.MultiIndex.from_arrays(
-                [
-                    pd.to_datetime(processed["time"]).to_numpy(dtype="datetime64[ns]"),
-                    processed["code"].map(engine_symbol),
-                ],
-                names=["date", "symbol"],
-            )
-            panel = panel.sort_index()
-            log.info(f"[预处理] 完成：{len(panel)} 行；各因子空值数 {panel.isna().sum().to_dict()}")
-            return panel
-        except BaseException as error:
-            log.error(f"[预处理] 失败：{error_text(error, settings.password.get_secret_value())}")
-            raise
-        finally:
-            if not owns_session:
-                release(
-                    session,
-                    [
-                        "preprocessSettings",
-                        "preprocessResult",
-                        *([] if is_variable else ["preprocessInput"]),
-                    ],
-                    ["preprocessFactor"],
-                )
+    try:
+        redirect_session_output(session)
+        upload(
+            session,
+            {
+                "preprocessSettings": {
+                    "database": settings.core_database,
+                    "table": settings.core_table,
+                    "columns": np.asarray(selected, dtype=str),
+                    "groups": np.int32(groups),
+                    "market": market_value_column,
+                    "industryColumn": industry_column,
+                    "factors": np.asarray(factors, dtype=str),
+                    "industry": np.asarray(
+                        [f for f in factors if f in INDUSTRY_FACTORS], dtype=str
+                    ),
+                    "financial": np.asarray(
+                        [f for f in factors if f in FINANCIAL_FACTORS], dtype=str
+                    ),
+                    "weights": np.asarray(
+                        [f for f in factors if f.startswith(WEIGHT_PREFIX)], dtype=str
+                    ),
+                    "st": IS_ST_FACTOR,
+                }
+            },
+            "中性化列设置",
+        )
+        if not is_variable:
+            upload(session, {input_ref: frame}, "本地因子表")
+        session.run(PREPROCESS_SCRIPT)
+        session.run(
+            f"preprocessResult = preprocessFactor({input_ref}, preprocessSettings); NULL"
+        )
+        processed = download(session, "preprocessResult", "最终中性化因子")
+        panel = processed[selected].astype(float)
+        panel.index = pd.MultiIndex.from_arrays(
+            [
+                pd.to_datetime(processed["time"]).to_numpy(dtype="datetime64[ns]"),
+                processed["code"].map(engine_symbol),
+            ],
+            names=["date", "symbol"],
+        )
+        panel = panel.sort_index()
+        logger.info(f"[预处理] 完成：{len(panel)} 行；各因子空值数 {panel.isna().sum().to_dict()}")
+        return panel
+    except BaseException as error:
+        logger.error(f"[预处理] 失败：{error_text(error, settings.password)}")
+        raise
+    finally:
+        release(
+            session,
+            [
+                "preprocessSettings",
+                "preprocessResult",
+                *([] if is_variable else ["preprocessInput"]),
+            ],
+            ["preprocessFactor"],
+        )

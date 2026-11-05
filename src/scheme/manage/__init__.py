@@ -5,8 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from query.utils import logger as log
-
+from scheme import logger
 from scheme.errors import error_text
 
 from .parameters import inspect_project
@@ -49,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
         descriptions = "; ".join(
             f"{item['package']} {item['version']} ({item['entry']})" for item in components
         )
-        log.info(f"任务 {input_file.parent.name}：类型={kind}，组件={descriptions}，输出={output}")
+        logger.info(f"任务 {input_file.parent.name}：类型={kind}，组件={descriptions}，输出={output}")
         from scheme.execute.checkpoints import Checkpoints
 
         environment = data.get("environment")
@@ -64,12 +63,12 @@ def main(argv: list[str] | None = None) -> int:
         else:
             from scheme.execute.strategy.task import run
         code = run(data, checkpoints=checkpoints)
-        log.success(f"正式任务完成：{kind}，输出 {output}")
+        logger.success(f"正式任务完成：{kind}，输出 {output}")
         return code
     except Exception as error:
         if arguments.command == "run":
             # 正式任务的错误连同 traceback 进入调度日志；parameters 的 stderr 仍是单行错误协议。
-            log.error(f"正式任务失败：{error_text(error, traceback=True)}")
+            logger.error(f"正式任务失败：{error_text(error, traceback=True)}")
         else:
             print(f"{type(error).__name__}: {error}", file=sys.stderr)
         return 1

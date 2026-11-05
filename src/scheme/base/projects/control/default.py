@@ -8,15 +8,14 @@ from pydantic import Field
 
 from scheme.base.internal.context import ResearchContext
 from scheme.base.internal.types import Order, Target
-from scheme.base.projects.control import ControlAlgo
-from scheme.base.projects.control import ControlParams as BaseControlParams
+from scheme.base.projects.control import ControlAlgo, params
 
 __all__ = ["ControlParams", "NoControl"]
 
 C = TypeVar("C", bound=ResearchContext[Any], infer_variance=True)
 
 
-class ControlParams(BaseControlParams):
+class ControlParams(params.ControlParams):
     lot_size: int = Field(default=100, ge=1)
 
 

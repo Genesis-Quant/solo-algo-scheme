@@ -5,13 +5,12 @@ from typing import TYPE_CHECKING, Any, Literal, Self, TypeVar
 
 from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field, model_validator
 
-import scheme
 from scheme.base.internal.context import ResearchContext
+from scheme.data.dolphindb.settings import DolphinSettings
 from scheme.data.dolphindb.symbols import engine_symbol
-from scheme.data.dolphindb.universe import Universe
+from scheme.data.universe import Universe
 
 if TYPE_CHECKING:
-    from scheme.config import DolphinSettings
     from scheme.execute.strategy.assembly import Strategy
     from scheme.execute.strategy.result import BacktestResult
 
@@ -92,9 +91,11 @@ class StrategyAnalysisParams(StrategyParams):
         self,
         strategy: "Strategy[P, C]",
         *,
-        settings: "DolphinSettings | None" = None,
+        settings: type[DolphinSettings] = DolphinSettings,
     ) -> "BacktestResult[Self]":
-        assembly = scheme.execute.strategy.assembly
+        from scheme.execute.strategy import assembly
+        from scheme.execute.strategy.api import run_backtest
+
         if not isinstance(strategy, assembly.Strategy):
             raise TypeError("run 需要已组装的 Strategy")
         checked = set(StrategyParams.model_fields)
@@ -138,6 +139,4 @@ class StrategyAnalysisParams(StrategyParams):
             if name not in expected or name not in actual or actual[name] != expected[name]:
                 raise ValueError("分析参数必须与 Strategy 的运行参数一致")
         algos, ctx = strategy.fresh()
-        return scheme.execute.strategy.api.run_backtest(
-            algos, ctx, self, settings=settings
-        )
+        return run_backtest(algos, ctx, self, settings=settings)

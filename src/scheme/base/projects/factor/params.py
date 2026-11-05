@@ -5,12 +5,11 @@ from typing import TYPE_CHECKING, Literal, Self, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-import scheme
+from scheme.data.dolphindb.settings import DolphinSettings
 from scheme.data.dolphindb.symbols import engine_symbol
-from scheme.data.dolphindb.universe import Universe
+from scheme.data.universe import Universe
 
 if TYPE_CHECKING:
-    from scheme.config import DolphinSettings
     from scheme.execute.factor.result import FactorAnalysisResult
 
     from .algo import Factor
@@ -99,11 +98,15 @@ class FactorAnalysisParams(FactorParams):
         self.columns = columns
 
     def run(
-        self, factor: "type[Factor[P]]", *, settings: "DolphinSettings | None" = None
+        self, factor: "type[Factor[P]]", *, settings: type[DolphinSettings] = DolphinSettings
     ) -> "FactorAnalysisResult[Self]":
-        if not isinstance(factor, type) or not issubclass(factor, scheme.base.Factor):
+        from scheme.execute.factor.api import analyze_factors
+        from scheme.execute.strategy.assembly import parameter_type, project_parameters
+
+        from .algo import Factor
+
+        if not isinstance(factor, type) or not issubclass(factor, Factor):
             raise TypeError("run 需要 Factor 类")
         self.bind_columns(factor)
-        assembly = scheme.execute.strategy.assembly
-        params = assembly.project_parameters(assembly.parameter_type(factor), self)
-        return scheme.execute.factor.api.analyze_factors(factor(params), self, settings=settings)
+        params = project_parameters(parameter_type(factor), self)
+        return analyze_factors(factor(params), self, settings=settings)

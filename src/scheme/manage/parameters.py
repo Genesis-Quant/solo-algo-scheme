@@ -3,7 +3,7 @@
 import importlib
 import sys
 import tomllib
-from importlib import metadata as packages
+from importlib import metadata
 from pathlib import Path
 from types import UnionType
 from typing import Any, Union, get_args, get_origin
@@ -134,10 +134,10 @@ def resolve_analysis_type(form: type[ReportForm], expected: type[BaseModel]) -> 
 
 
 def inspect_project(directory: Path, values: dict | None = None) -> dict:
-    metadata = tomllib.loads((directory / "pyproject.toml").read_text())
-    module_name = metadata.get("tool", {}).get("uv", {}).get("build-backend", {}).get(
+    manifest = tomllib.loads((directory / "pyproject.toml").read_text())
+    module_name = manifest.get("tool", {}).get("uv", {}).get("build-backend", {}).get(
         "module-name"
-    ) or metadata["project"]["name"].replace("-", "_")
+    ) or manifest["project"]["name"].replace("-", "_")
     sys.path.insert(0, str(directory / "src"))
     module = importlib.import_module(module_name)
     if not Path(module.__file__).resolve().is_relative_to(directory.resolve()):
@@ -178,7 +178,7 @@ def inspect_project(directory: Path, values: dict | None = None) -> dict:
                     continue
                 entry = getattr(analysis, name)
                 package = entry.split(":")[0].replace("_", "-")
-                dist = packages.distribution(package)
+                dist = metadata.distribution(package)
                 upstream[name] = {
                     "package": dist.metadata["Name"],
                     "version": dist.version,

@@ -11,8 +11,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from query.utils import logger as log
-
+from scheme import logger
 from scheme.errors import error_text
 
 __all__ = ["Checkpoints"]
@@ -80,7 +79,7 @@ class Checkpoints:
                 if file_sha256(directory / name) != digests[name]:
                     raise ValueError(f"文件 SHA256 不一致：{name}")
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
-            log.warning(f"[检查点] 丢弃{LABELS.get(stage, stage)}：{error_text(error)}")
+            logger.warning(f"[检查点] 丢弃{LABELS.get(stage, stage)}：{error_text(error)}")
             shutil.rmtree(directory, ignore_errors=True)
             return None
         return directory
@@ -93,10 +92,10 @@ class Checkpoints:
             with (directory / VALUE).open("rb") as file:
                 value = pickle.load(file)
         except Exception as error:
-            log.warning(f"[检查点] {LABELS[stage]}无法读取，重新计算：{error_text(error)}")
+            logger.warning(f"[检查点] {LABELS[stage]}无法读取，重新计算：{error_text(error)}")
             shutil.rmtree(directory, ignore_errors=True)
             return None
-        log.info(
+        logger.info(
             f"[检查点] 复用{LABELS[stage]}结果，跳过该阶段"
             f"（{readable((directory / VALUE).stat().st_size)}）"
         )
@@ -112,7 +111,7 @@ class Checkpoints:
         try:
             self.commit(stage, write)
         except Exception as error:
-            log.warning(f"[检查点] 保存{LABELS[stage]}失败，本次运行继续：{error_text(error)}")
+            logger.warning(f"[检查点] 保存{LABELS[stage]}失败，本次运行继续：{error_text(error)}")
 
     def commit(self, stage: str, write: Callable[[Path], object]) -> Path:
         """先写入临时目录，清单最后写入，再整体替换为阶段目录。"""
@@ -146,7 +145,7 @@ class Checkpoints:
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
             raise
-        log.info(
+        logger.info(
             f"[检查点] 已保存{LABELS[stage]}（{readable(sum(files.values()))}），"
             "失败或终止后重试将直接复用"
         )
@@ -170,6 +169,6 @@ class Checkpoints:
         try:
             shutil.rmtree(self.directory)
         except OSError as error:
-            log.warning(f"[检查点] 运行已成功，但删除检查点失败：{error_text(error)}")
+            logger.warning(f"[检查点] 运行已成功，但删除检查点失败：{error_text(error)}")
             return
-        log.info("[检查点] 运行成功，已删除全部检查点")
+        logger.info("[检查点] 运行成功，已删除全部检查点")

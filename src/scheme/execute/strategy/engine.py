@@ -4,14 +4,15 @@ from collections.abc import Sequence
 from math import isfinite
 from typing import Any, Generic, TypeVar
 
-from backtest import Backtest as BaseBacktest
+import backtest
 from backtest import DosVar
 from pydantic import BaseModel
-from query.utils import logger as log
+from query import initialize_query
 
+from scheme import logger
 from scheme.base import Algo, Order
-from scheme.config import DolphinSettings
-from scheme.data.dolphindb.database.session import download, open_session, release
+from scheme.data.dolphindb.database.session import create_session, download, release
+from scheme.data.dolphindb.settings import DolphinSettings
 from scheme.data.dolphindb.symbols import engine_symbol, normalize_order
 from scheme.errors import error_text
 
@@ -20,12 +21,12 @@ __all__ = ["Backtest"]
 C = TypeVar("C", bound=BaseModel, infer_variance=True)
 
 
-class Backtest(BaseBacktest[C], Generic[C]):
+class Backtest(backtest.Backtest[C], Generic[C]):
     algos: tuple[Algo[Any, C], ...]
 
     def __init__(
         self,
-        settings: DolphinSettings,
+        settings: type[DolphinSettings],
         *,
         engine_name: str,
         config: dict[str, Any],
@@ -34,8 +35,17 @@ class Backtest(BaseBacktest[C], Generic[C]):
     ) -> None:
         self.settings = settings
         self.latest_prices: dict[str, float] = {}
+        session = create_session(settings)
+        try:
+            initialize_query(session)
+        except BaseException:
+            try:
+                session.close()
+            except Exception as error:
+                logger.warning(f"[回测] 初始化失败后关闭会话异常：{error_text(error, settings.password)}")
+            raise
         super().__init__(
-            session=open_session(settings),
+            session=session,
             engine_name=engine_name,
             config=config,
             ctx=ctx,
@@ -95,5 +105,5 @@ class Backtest(BaseBacktest[C], Generic[C]):
                 if not progressed:
                     return
         except Exception as error:
-            log.error(f"研究事件处理失败：事件={callback}，时间={self.time}；{error_text(error)}")
+            logger.error(f"研究事件处理失败：事件={callback}，时间={self.time}；{error_text(error)}")
             raise

@@ -3,13 +3,13 @@ from typing import TypeVar
 
 import numpy as np
 import pandas as pd
-from query.utils import logger as log
+from query import execute_query, initialize_query
 
+from scheme import logger
 from scheme.base import Factor, FactorAnalysisParams, FactorParams
 from scheme.base.projects.factor.algo import validate_result
-from scheme.config import DolphinSettings
-from scheme.data import query
-from scheme.data.dolphindb.database.session import open_session, release, upload
+from scheme.data.dolphindb.database.session import create_session, release, upload
+from scheme.data.dolphindb.settings import DolphinSettings
 from scheme.data.dolphindb.symbols import engine_symbol, source_symbol
 from scheme.errors import error_text
 from scheme.execute.checkpoints import Checkpoints
@@ -678,14 +678,13 @@ def analyze_factors(
     factor: Factor[P],
     parameters: A,
     *,
-    settings: DolphinSettings | None = None,
+    settings: type[DolphinSettings] = DolphinSettings,
     checkpoints: Checkpoints | None = None,
 ) -> FactorAnalysisResult[A]:
     parameters.bind_columns(factor)
     if factor.params.groups != parameters.groups:
         raise ValueError("因子预处理与分析必须使用同一分组数量")
-    settings = settings if settings is not None else DolphinSettings.from_env()
-    log.info(
+    logger.info(
         f"[分析] {parameters.start} 至 {parameters.end}，因子={parameters.columns}，"
         f"收益={parameters.return_columns}，分组={parameters.groups}，加权={parameters.weight}"
     )
@@ -750,14 +749,15 @@ def analyze_factors(
         }
         for lag in range(1, parameters.max_lag + 1)
     }
-    session = open_session(settings)
+    session = create_session(settings)
     try:
+        initialize_query(session)
         # 按实际交易日期读取足够的未来行情；观测数不能直接当成自然日时长。
         upload(
             session,
             {
-                "analysisCalendarDatabase": settings.database,
-                "analysisCalendarTable": settings.table,
+                "analysisCalendarDatabase": settings.core_database,
+                "analysisCalendarTable": settings.core_table,
                 "analysisCalendarEnd": np.datetime64(parameters.end, "ms") + np.timedelta64(1, "D"),
                 "analysisCalendarCode": source_symbol(parameters.calendar_symbol),
             },
@@ -776,7 +776,7 @@ def analyze_factors(
         lookforward = timedelta(0)
         if len(future_dates):
             lookforward = pd.Timestamp(future_dates[-1]).normalize().date() - parameters.end
-        with query(
+        with execute_query(
             {
                 "start_date": parameters.start.isoformat(),
                 "end_date": parameters.end.isoformat(),
@@ -814,13 +814,13 @@ def analyze_factors(
             release(session, ["analysisSource", "analysisSettings"], ["analyzeFactor"])
         report = FactorAnalysisResult(session=session, parameters=parameters.model_copy(deep=True))
     except BaseException as error:
-        log.error(f"[分析] 失败：{error_text(error, settings.password.get_secret_value())}")
+        logger.error(f"[分析] 失败：{error_text(error, settings.password)}")
         try:
             session.close()
         except Exception as close_error:
-            log.warning(
-                f"[分析] 关闭失败会话异常：{error_text(close_error, settings.password.get_secret_value())}"
+            logger.warning(
+                f"[分析] 关闭失败会话异常：{error_text(close_error, settings.password)}"
             )
         raise
-    log.success(f"[分析] 完成：输入 {len(source)} 行，结果保留在服务器，按需读取")
+    logger.success(f"[分析] 完成：输入 {len(source)} 行，结果保留在服务器，按需读取")
     return report

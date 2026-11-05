@@ -365,8 +365,8 @@ wheels = [
 
 [[package]]
 name = "query"
-version = "0.1.5"
-source = { git = "https://gitee.com/genesis-quant/query?rev=0137abd8ee8ea3bc81677fb27569372eb3c1b87d#0137abd8ee8ea3bc81677fb27569372eb3c1b87d" }
+version = "0.1.6"
+source = { git = "https://gitee.com/genesis-quant/query?rev=8a1ec272c9bb23af840c6ebdd04c7df98ce6dede#8a1ec272c9bb23af840c6ebdd04c7df98ce6dede" }
 dependencies = [
     { name = "dolphindb" },
     { name = "loguru" },
@@ -420,7 +420,7 @@ wheels = [
 
 [[package]]
 name = "scheme"
-version = "1.12.14"
+version = "1.12.15"
 source = { editable = "." }
 dependencies = [
     { name = "backtest" },
@@ -450,7 +450,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.2,<3" },
     { name = "pyarrow", specifier = ">=21" },
     { name = "pydantic", specifier = ">=2,<3" },
-    { name = "query", git = "https://gitee.com/genesis-quant/query?rev=0137abd8ee8ea3bc81677fb27569372eb3c1b87d" },
+    { name = "query", git = "https://gitee.com/genesis-quant/query?rev=8a1ec272c9bb23af840c6ebdd04c7df98ce6dede" },
     { name = "scipy", specifier = ">=1.14" },
     { name = "tushare", specifier = ">=1.4.29,<2" },
 ]

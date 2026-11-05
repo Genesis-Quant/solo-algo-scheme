@@ -6,13 +6,14 @@ from typing import Any, ClassVar
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
-from query.utils import logger as log
+from query import execute_query
+from query.execute.result import QueryResult
 
-from scheme.config import DolphinSettings
+from scheme import logger
 
-from .api import QueryResult, query
-from .database.session import download
-from .symbols import engine_symbol
+from .dolphindb.database.session import download
+from .dolphindb.settings import DolphinSettings
+from .dolphindb.symbols import engine_symbol
 
 __all__ = ["MEMBERS", "StockPool", "Universe"]
 
@@ -64,12 +65,12 @@ class Universe(BaseModel):
         start: date,
         end: date,
         *,
-        session: Any | None = None,
-        settings: DolphinSettings | None = None,
+        session: Any,
+        settings: type[DolphinSettings] = DolphinSettings,
     ) -> QueryResult:
         if start >= end:
             raise ValueError("股票池日期必须满足 start < end，采用 [start, end)")
-        return query(
+        return execute_query(
             {
                 "start_date": start.isoformat(),
                 "end_date": (end - timedelta(days=1)).isoformat(),
@@ -86,8 +87,8 @@ class Universe(BaseModel):
         start: date,
         end: date,
         *,
-        session: Any | None = None,
-        settings: DolphinSettings | None = None,
+        session: Any,
+        settings: type[DolphinSettings] = DolphinSettings,
     ) -> list[str]:
         """从已经过滤的成员记录取证券并集，返回 .SH/.SZ 代码。"""
         with self.member_query(start, end, session=session, settings=settings) as result:
@@ -95,13 +96,13 @@ class Universe(BaseModel):
                 map(
                     str,
                     download(
-                        result.session,
+                        session,
                         f"exec distinct code from {result.data_ref} order by code",
                         f"{self.pool} 历史候选证券",
                     ),
                 )
             )
-        log.info(f"[股票池] {self.pool} 候选证券已确定：{len(codes)} 只")
+        logger.info(f"[股票池] {self.pool} 候选证券已确定：{len(codes)} 只")
         return codes
 
     def evaluate(
@@ -109,14 +110,14 @@ class Universe(BaseModel):
         start: date,
         end: date,
         *,
-        session: Any | None = None,
-        settings: DolphinSettings | None = None,
+        session: Any,
+        settings: type[DolphinSettings] = DolphinSettings,
     ) -> pd.DataFrame:
         """返回交易日 × 历史成员面板，非成员日保留 False。"""
         with self.member_query(start, end, session=session, settings=settings) as result:
             days = pd.DatetimeIndex(result.calendar).as_unit("ns")
             members = download(
-                result.session,
+                session,
                 f"select date(time) as date, string(code) as code, {self.member} as member from {result.data_ref}",
                 f"{self.pool} 逐日成员",
             )
@@ -126,7 +127,7 @@ class Universe(BaseModel):
         panel.index = pd.DatetimeIndex(panel.index).as_unit("ns")
         panel = panel.reindex(days).eq(True)
         panel.index.name = "date"
-        log.info(
+        logger.info(
             f"[股票池] {self.pool} 面板已就绪：{len(panel)} 个交易日、{len(panel.columns)} 只历史成员"
         )
         return panel

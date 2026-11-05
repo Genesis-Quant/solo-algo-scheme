@@ -5,9 +5,10 @@ from functools import cached_property
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast, overload
 
+import backtest
 import pandas as pd
-from backtest import Algo as BacktestAlgo
 from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict
+from query import initialize_query
 
 from scheme.base import (
     Algo,
@@ -22,6 +23,7 @@ from scheme.base.internal.generic import generic_arguments
 from scheme.base.projects.control.default import NoControl
 from scheme.base.projects.execution.default import DirectExecution
 from scheme.base.projects.optimize.default import RiskParity
+from scheme.data.dolphindb.database.session import create_session
 
 if TYPE_CHECKING:
     from scheme.base.projects.factor.params import FactorParams
@@ -38,7 +40,7 @@ T = TypeVar("T", infer_variance=True)
 def generic_model(cls: type, index: int) -> type[BaseModel]:
     """从 Factor[P] / Algo[P, C] 的继承关系解析参数或上下文模型。"""
     try:
-        args = generic_arguments(cls, (Factor, Algo, BacktestAlgo))
+        args = generic_arguments(cls, (Factor, Algo, backtest.Algo))
     except TypeError as error:
         raise TypeError(f"{cls.__name__} 必须明确指定 BaseModel 参数泛型") from error
     if len(args) > index:
@@ -200,4 +202,8 @@ class Strategy(Generic[StrategyP, C]):
     @cached_property
     def universe(self) -> pd.DataFrame:
         """参数区间的股票池 bool 面板，首次访问时查询。"""
-        return self.params.universe.evaluate(self.params.start, self.params.end)
+        with create_session() as session:
+            initialize_query(session)
+            return self.params.universe.evaluate(
+                self.params.start, self.params.end, session=session
+            )

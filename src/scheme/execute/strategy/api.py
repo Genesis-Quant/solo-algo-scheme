@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from contextlib import nullcontext
 from datetime import timedelta
 from functools import cached_property
 from typing import Any, Generic, TypeVar
@@ -16,12 +17,12 @@ from backtest import (
     TradeDetail,
 )
 from pydantic import BaseModel
-from query.utils import logger as log
+from query import execute_query, initialize_query
 
+from scheme import logger
 from scheme.base import Algo, ResearchContext, StrategyAnalysisParams
-from scheme.config import DolphinSettings
-from scheme.data import query
-from scheme.data.dolphindb.database.session import download, release, upload
+from scheme.data.dolphindb.database.session import create_session, download, release, upload
+from scheme.data.dolphindb.settings import DolphinSettings
 from scheme.data.dolphindb.symbols import engine_symbol, source_symbol
 from scheme.errors import error_text
 from scheme.execute.checkpoints import Checkpoints
@@ -161,7 +162,7 @@ def costs(config: dict[str, Any]) -> dict[str, float]:
 class ResearchBacktest(Backtest[BacktestC], Generic[BacktestC]):
     def __init__(
         self,
-        settings: DolphinSettings,
+        settings: type[DolphinSettings],
         parameters: StrategyAnalysisParams,
         ctx: BacktestC,
         algos: Sequence[Algo[Any, BacktestC]],
@@ -208,7 +209,7 @@ class ResearchBacktest(Backtest[BacktestC], Generic[BacktestC]):
             try:
                 self.close()
             except Exception as error:
-                log.warning(f"[回测] 初始化失败后关闭引擎异常：{error_text(error)}")
+                logger.warning(f"[回测] 初始化失败后关闭引擎异常：{error_text(error)}")
             raise
 
     def load_timeline(
@@ -226,7 +227,7 @@ class ResearchBacktest(Backtest[BacktestC], Generic[BacktestC]):
             self.daily_timeline = np.array([], dtype="datetime64[ms]")
             self.daily_counts = np.array([], dtype=np.int64)
             return DosVar("soloDailyMessages")
-        with query(
+        with execute_query(
             {
                 "start_date": self.parameters.start.isoformat(),
                 "end_date": (self.parameters.end - timedelta(days=1)).isoformat(),
@@ -282,7 +283,7 @@ class ResearchBacktest(Backtest[BacktestC], Generic[BacktestC]):
             "factors": fields,
         }
         try:
-            with query(
+            with execute_query(
                 request,
                 session=self.session,
                 settings=self.settings,
@@ -358,11 +359,10 @@ def run_backtest(
     ctx: C,
     parameters: A,
     *,
-    settings: DolphinSettings | None = None,
+    settings: type[DolphinSettings] = DolphinSettings,
     engine_type: type[ResearchBacktest[C]] = ResearchBacktest,
     checkpoints: Checkpoints | None = None,
 ) -> BacktestResult[A]:
-    settings = settings if settings is not None else DolphinSettings.from_env()
     if not algos:
         raise ValueError("至少需要一个 Algo")
     for algo in algos:
@@ -371,7 +371,7 @@ def run_backtest(
         validate_context(algo, ctx)
     config = costs(parameters.config)
     algorithms = "、".join(type(algo).__name__ for algo in algos)
-    log.info(
+    logger.info(
         f"[回测] 开始：{parameters.start} 至 {parameters.end}（不含），{parameters.market_data}，"
         f"每批 {parameters.batch_days} 天；资金 {config['cash']:,.0f}，佣金 {config['commission']:.4%}，"
         f"印花税 {config['tax']:.4%}，基准={parameters.benchmark or '无'}，算法={algorithms}"
@@ -379,22 +379,22 @@ def run_backtest(
     try:
         result = execute_backtest(algos, ctx, parameters, settings, engine_type, checkpoints)
     except Exception as error:
-        log.error(
+        logger.error(
             f"[回测] 失败：{parameters.start} 至 {parameters.end}，"
-            f"{error_text(error, settings.password.get_secret_value())}"
+            f"{error_text(error, settings.password)}"
         )
         raise
     try:
         summarize(result)
     except Exception as error:
-        log.warning(f"[回测] 结果摘要生成失败，原始报告保留：{error_text(error)}")
+        logger.warning(f"[回测] 结果摘要生成失败，原始报告保留：{error_text(error)}")
     return result
 
 
 def summarize(result: BacktestResult[Any]) -> None:
     portfolios = result.daily_portfolios
     if portfolios.empty:
-        log.warning("[回测] 没有生成账户记录")
+        logger.warning("[回测] 没有生成账户记录")
         return
     net_value = portfolios.netValue
     drawdown = (1 - net_value / net_value.cummax().clip(lower=1.0)).max()
@@ -407,7 +407,7 @@ def summarize(result: BacktestResult[Any]) -> None:
     orders = details.orderId.nunique()
     filled = details.loc[details.orderStatus == OrderStatus.FILLED, "orderId"].nunique()
     rejected = details[details.orderStatus == OrderStatus.REJECTED]
-    log.info(
+    logger.info(
         f"[回测] 完成：{portfolios.tradeDate.iloc[0]} 至 {portfolios.tradeDate.iloc[-1]}，"
         f"共 {len(portfolios)} 个交易日；净值 {net_value.iloc[-1]:.4f}（{net_value.iloc[-1] - 1:+.2%}），"
         f"基准 {benchmark}，最大回撤 {drawdown:.2%}，手续费 {portfolios.totalFee.iloc[-1]:,.0f}；"
@@ -423,7 +423,7 @@ def summarize(result: BacktestResult[Any]) -> None:
             if not reasons.empty
             else "插件未返回拒单原因；按订单号查看回报或成交明细"
         )
-        log.warning(
+        logger.warning(
             f"拒单 {len(rejected)} 笔（买入 {buys}，卖出 {len(rejected) - buys}）：{description}"
         )
 
@@ -442,25 +442,28 @@ RECORDS = frozenset(
 def with_benchmark(
     portfolios: pd.DataFrame,
     parameters: StrategyAnalysisParams,
-    settings: DolphinSettings,
+    settings: type[DolphinSettings],
     session: Any | None,
 ) -> pd.DataFrame:
-    """session 为空时由查询自行建立并关闭连接，用于从回放检查点恢复。"""
+    """检查点恢复需要新连接时由Scheme创建，Query只借用会话。"""
     if not parameters.benchmark or portfolios.empty:
         return portfolios
-    with query(
-        {
-            "start_date": parameters.start.isoformat(),
-            "end_date": (parameters.end - timedelta(days=1)).isoformat(),
-            "codes": [source_symbol(parameters.benchmark)],
-            "factors": ["close"],
-        },
-        session=session,
-        settings=settings,
-    ) as result:
-        benchmark = result.data
+    with create_session(settings) if session is None else nullcontext(session) as current:
+        if session is None:
+            initialize_query(current)
+        with execute_query(
+            {
+                "start_date": parameters.start.isoformat(),
+                "end_date": (parameters.end - timedelta(days=1)).isoformat(),
+                "codes": [source_symbol(parameters.benchmark)],
+                "factors": ["close"],
+            },
+            session=current,
+            settings=settings,
+        ) as result:
+            benchmark = result.data
     if benchmark.empty:
-        log.warning(f"基准 {parameters.benchmark} 没有行情，不输出基准列")
+        logger.warning(f"基准 {parameters.benchmark} 没有行情，不输出基准列")
         return portfolios
     benchmark["tradeDate"] = benchmark.time.dt.date
     portfolios = portfolios.merge(
@@ -484,14 +487,14 @@ def execute_backtest(
     algos: Sequence[Algo[Any, C]],
     ctx: C,
     parameters: A,
-    settings: DolphinSettings,
+    settings: type[DolphinSettings],
     engine_type: type[ResearchBacktest[C]],
     checkpoints: Checkpoints | None = None,
 ) -> BacktestResult[A]:
     # 引擎状态保存在 DolphinDB 回测插件中，回放只能整体复用，不能从中途批次继续。
     records = checkpoints.load("backtest") if checkpoints is not None else None
     if records is not None and not (isinstance(records, dict) and RECORDS <= records.keys()):
-        log.warning("[检查点] 回测回放结果格式不符，重新回放")
+        logger.warning("[检查点] 回测回放结果格式不符，重新回放")
         records = None
     if records is None:
         with engine_type(settings, parameters, ctx, algos) as engine:

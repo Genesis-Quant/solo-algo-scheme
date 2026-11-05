@@ -2,7 +2,7 @@
 
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
-from backtest import Algo as BaseAlgo
+import backtest
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
@@ -14,7 +14,7 @@ P = TypeVar("P", infer_variance=True)
 C = TypeVar("C", bound=BaseModel, infer_variance=True)
 
 
-class Algo(BaseAlgo[P, C], Generic[P, C]):
+class Algo(backtest.Algo[P, C], Generic[P, C]):
     backtest: "Backtest[C]"
 
     def __init__(self, params: P) -> None:

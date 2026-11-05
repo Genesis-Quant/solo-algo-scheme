@@ -1,8 +1,7 @@
 from importlib.metadata import distribution
 from typing import Any
 
-from query.utils import logger as log
-
+from scheme import logger
 from scheme.base import Algo, ResearchContext
 from scheme.execute.checkpoints import Checkpoints
 from scheme.execute.packages import installed_versions, load_component, load_entry
@@ -23,7 +22,7 @@ def run(data: dict[str, Any], *, checkpoints: Checkpoints | None = None) -> int:
         component = getattr(task.algos, name)
         if component:
             algos[name] = load_component(component, Algo)
-            log.info(f"加载 {name}：{component.package} {component.version}（{component.entry}）")
+            logger.info(f"加载 {name}：{component.package} {component.version}（{component.entry}）")
     context = (
         load_entry(distribution(task.algos.model.package), task.context)
         if task.context
@@ -34,6 +33,6 @@ def run(data: dict[str, Any], *, checkpoints: Checkpoints | None = None) -> int:
     if resume_run(task, BacktestResult, versions, checkpoints):
         return 0
     strategy = Strategy(context(), params=task.backtest, **algos)
-    result = run_backtest(strategy.algos, strategy.ctx, task.backtest, checkpoints=checkpoints)
-    save_run(task, result, versions, checkpoints)
+    with run_backtest(strategy.algos, strategy.ctx, task.backtest, checkpoints=checkpoints) as result:
+        save_run(task, result, versions, checkpoints)
     return 0

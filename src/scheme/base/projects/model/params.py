@@ -5,13 +5,12 @@ from typing import TYPE_CHECKING, Any, Literal, Self, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-import scheme
 from scheme.base.internal.context import ResearchContext
 from scheme.base.internal.params import validate_backtest, validate_research
-from scheme.data.dolphindb.universe import Universe
+from scheme.data.dolphindb.settings import DolphinSettings
+from scheme.data.universe import Universe
 
 if TYPE_CHECKING:
-    from scheme.config import DolphinSettings
     from scheme.execute.strategy.result import BacktestResult
 
     from .algo import ModelAlgo
@@ -70,8 +69,8 @@ class ModelAnalysisParams(ModelParams):
         algo: "type[ModelAlgo[P, C]]",
         *,
         ctx: C | None = None,
-        settings: "DolphinSettings | None" = None,
+        settings: type[DolphinSettings] = DolphinSettings,
     ) -> "BacktestResult[Self]":
-        return scheme.execute.strategy.components.run_research(
-            self, "model", algo, ctx=ctx, settings=settings
-        )
+        from scheme.execute.strategy.components import run_research
+
+        return run_research(self, "model", algo, ctx=ctx, settings=settings)

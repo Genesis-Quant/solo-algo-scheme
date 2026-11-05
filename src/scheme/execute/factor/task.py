@@ -1,7 +1,6 @@
 from typing import Any
 
-from query.utils import logger as log
-
+from scheme import logger
 from scheme.base import Factor
 from scheme.execute.checkpoints import Checkpoints
 from scheme.execute.factor.api import analyze_factors
@@ -18,7 +17,7 @@ def run(data: dict[str, Any], *, checkpoints: Checkpoints | None = None) -> int:
     versions = installed_versions()
     factor = load_component(task.factor, Factor)
     task.analysis.bind_columns(factor)
-    log.info(f"加载因子：{task.factor.package} {task.factor.version}（{task.factor.entry}）")
+    logger.info(f"加载因子：{task.factor.package} {task.factor.version}（{task.factor.entry}）")
     shared = {"universe": task.analysis.universe, "groups": task.analysis.groups}
     params = project_parameters(parameter_type(factor), task.factor.params, overrides=shared)
     task.factor.params = params.model_dump(mode="json")

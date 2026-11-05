@@ -1,9 +1,67 @@
-"""因子分析、策略组装和回测的执行入口。"""
+"""因子分析、策略组装、订单、回测执行及运行结果。"""
+
+from backtest import (
+    AlgoPriceType,
+    DailyPortfolio,
+    DailyPosition,
+    DailyTradingStatistics,
+    Direction,
+    EngineContext,
+    LimitOrder,
+    MarketOrder,
+    Order,
+    OrderKind,
+    OrderReport,
+    OrderStatus,
+    Position,
+    PriceType,
+    StopLimitOrder,
+    StopMarketOrder,
+    TimeInForce,
+    TradeDetail,
+    TradeReport,
+    TWAPOrder,
+    VWAPOrder,
+)
 
 from .factor import FactorAnalysisResult, analyze_factors
-from .strategy import AlgoComponents, BacktestResult, ResearchBacktest, Strategy, run_backtest
+from .strategy import (
+    AlgoComponents,
+    BacktestResult,
+    ResearchBacktest,
+    Strategy,
+    algo_options,
+    run_backtest,
+)
 
 __all__ = [
-    "AlgoComponents", "BacktestResult", "FactorAnalysisResult", "ResearchBacktest",
-    "Strategy", "analyze_factors", "run_backtest",
+    "AlgoComponents",
+    "AlgoPriceType",
+    "BacktestResult",
+    "DailyPortfolio",
+    "DailyPosition",
+    "DailyTradingStatistics",
+    "Direction",
+    "EngineContext",
+    "FactorAnalysisResult",
+    "LimitOrder",
+    "MarketOrder",
+    "Order",
+    "OrderKind",
+    "OrderReport",
+    "OrderStatus",
+    "Position",
+    "PriceType",
+    "ResearchBacktest",
+    "StopLimitOrder",
+    "StopMarketOrder",
+    "Strategy",
+    "TWAPOrder",
+    "TimeInForce",
+    "TradeDetail",
+    "TradeReport",
+    "VWAPOrder",
+    "algo_options",
+    "analyze_factors",
+    "run_backtest",
 ]

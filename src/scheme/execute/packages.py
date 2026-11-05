@@ -1,20 +1,21 @@
 """包身份、锁定版本和类入口校验；不在已运行的 Kernel 中安装依赖。"""
 
 import importlib
-import importlib.metadata as metadata
 import re
+from importlib import metadata
 
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import Version
-from query.utils import logger as log
+
+from scheme import logger
 
 from .schema import Package
 
 
 def installed_versions() -> dict[str, str]:
     versions = {canonicalize_name(d.metadata["Name"]): d.version for d in metadata.distributions()}
-    log.info(
+    logger.info(
         f"运行环境：Scheme {versions.get('scheme', '未安装')}，"
         f"Backtest {versions.get('backtest', '未安装')}，"
         f"Query {versions.get('query', '未安装')}，"
